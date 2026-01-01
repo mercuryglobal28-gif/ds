@@ -10,7 +10,7 @@ app = FastAPI()
 # ==========================================
 # 🇷🇺 إعدادات البروكسي
 # ==========================================
-PROXY_SERVER = "http://78.153.4.52:8080" # 👈 غيّر هذا إذا لم يعمل
+PROXY_SERVER = "http://81.177.111.146:8080" # 👈 غيّر هذا إذا لم يعمل
 PROXY_CONFIG = {"server": PROXY_SERVER}
 # ==========================================
 
@@ -130,3 +130,4 @@ def get_movie_api(url: str = Query(..., description="Movie URL")):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
