@@ -1,26 +1,26 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Request
 from playwright.sync_api import sync_playwright
 import uvicorn
 import os
 import traceback
 import base64
+from urllib.parse import unquote
 
 app = FastAPI()
 
-# البروكسي الذي أثبت نجاحه في جلب الصفحة الروسية
+# البروكسي المعتمد
 WORKING_PROXY = "http://176.126.103.194:44214"
 
 def scrape_movie_data(full_url: str):
     logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Full URL: {full_url}")
+    logs.append(f"🔗 Received URL: {full_url}") # لنرى الرابط الذي وصل فعلاً
     
     movie_data = None
     snapshot = ""
     
     with sync_playwright() as p:
         try:
-            # تشغيل المتصفح مع البروكسي
             browser = p.chromium.launch(
                 headless=True,
                 proxy={"server": WORKING_PROXY},
@@ -35,60 +35,51 @@ def scrape_movie_data(full_url: str):
                 locale="ru-RU", 
                 timezone_id="Europe/Moscow"
             )
-            # زيادة المهلة لضمان تحميل الصفحة الثقيلة
             context.set_default_timeout(90000) 
             page = context.new_page()
 
-            # المصيدة: التقاط أي رابط فيديو (M3U8) أو ملف JSON يظهر في الشبكة
+            # المصيدة
             def handle_response(response):
                 nonlocal movie_data
                 try:
-                    # 1. البحث عن ملفات JSON الخاصة بالفيلم
+                    # JSON check
                     if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
                         data = response.json()
                         if "hlsSource" in data or "file" in data:
                             movie_data = data
                             logs.append("✅ JSON Data Captured!")
                     
-                    # 2. البحث المباشر عن روابط التشغيل m3u8 (حتى لو لم تظهر في JSON)
+                    # M3U8 Direct check
                     if "m3u8" in response.url and "master" in response.url:
-                         logs.append(f"✅ Direct M3U8 Found: {response.url}")
                          if not movie_data:
                              movie_data = {"direct_m3u8": response.url}
+                             logs.append("✅ Direct M3U8 Found")
 
                 except: pass
 
             page.on("response", handle_response)
-            
-            # حظر الصور والخطوط لتسريع الصفحة
             page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font"] else r.continue_())
 
             try:
                 logs.append("⏳ Loading Page...")
-                # فتح الرابط كما هو بالضبط دون تعديل
                 page.goto(full_url, wait_until="domcontentloaded")
                 
-                # محاولة التعامل مع المشغل (Iframe)
+                # التعامل مع المشغل
                 try:
-                    # ننتظر ظهور الإطار
-                    page.wait_for_selector("iframe", timeout=20000)
-                    
-                    # محاكاة نقرات لتفعيل الفيديو
+                    page.wait_for_selector("iframe", timeout=25000)
                     page.mouse.click(500, 300)
                     page.wait_for_timeout(2000)
                     page.mouse.click(500, 300)
-                except: 
-                    logs.append("⚠️ Could not click play button (might be autoplay)")
+                except: pass
 
-                # الانتظار حتى تظهر البيانات
-                for _ in range(150): # 15 ثانية
+                # انتظار البيانات
+                for _ in range(150):
                     if movie_data: break
                     page.wait_for_timeout(100)
 
             except Exception as e:
                 logs.append(f"❌ Navigation Error: {str(e)}")
 
-            # إذا فشل، نلتقط صورة لنرى هل تغيرت رسالة الخطأ
             if not movie_data:
                 try:
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
@@ -115,10 +106,21 @@ def scrape_movie_data(full_url: str):
 def home():
     return {"status": "Active", "proxy": WORKING_PROXY}
 
+# 👇👇 التغيير الجوهري هنا 👇👇
+# نستخدم Request بدلاً من Query لقراءة الرابط الخام
 @app.get("/get-movie")
-def get_movie_api(url: str = Query(..., description="Full URL")):
-    # نمرر الرابط مباشرة للدالة
-    return scrape_movie_data(url)
+def get_movie_api(request: Request):
+    # الحصول على الرابط الخام بالكامل كما وصل من المتصفح
+    raw_query = request.url.query
+    
+    # استخراج ما بعد "url=" يدوياً للحفاظ على الرموز &
+    if "url=" in raw_query:
+        target_url = raw_query.split("url=", 1)[1]
+        # فك التشفير في حال كان الرابط مشفراً (Encoded)
+        target_url = unquote(target_url)
+        return scrape_movie_data(target_url)
+    
+    return {"error": "Missing url parameter"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
