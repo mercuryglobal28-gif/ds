@@ -16,7 +16,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
     logs = debug_logs
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
     
-    # 2. تسجيل الرابط الذي سيستخدمه المتصفح للتأكد أنه كامل
+    # تسجيل الرابط الذي سيستخدمه المتصفح للتأكد أنه كامل
     logs.append(f"🔗 Browser Navigating to: {full_url}")
     
     movie_data = None
@@ -41,6 +41,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             context.set_default_timeout(90000) 
             page = context.new_page()
 
+            # دالة التقاط الـ JSON أو M3U8
             def handle_response(response):
                 nonlocal movie_data
                 try:
@@ -57,12 +58,31 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                 except: pass
 
             page.on("response", handle_response)
-            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font"] else r.continue_())
+
+            # ==================================================================
+            # 👇 التعديل الجديد: منع CSS، الصور، الخطوط، والوسائط 👇
+            # ==================================================================
+            def intercept_route(route):
+                # الأنواع المحظورة:
+                # stylesheet: ملفات التصميم CSS
+                # image: الصور والأيقونات
+                # font: الخطوط
+                # media: الفيديو والصوت
+                excluded_types = ["stylesheet", "image", "font", "media"]
+                
+                if route.request.resource_type in excluded_types:
+                    route.abort() # إلغاء الطلب
+                else:
+                    route.continue_() # السماح للباقي (HTML, Script, XHR/Fetch)
+
+            page.route("**/*", intercept_route)
+            # ==================================================================
 
             try:
                 logs.append("⏳ Loading Page...")
                 page.goto(full_url, wait_until="domcontentloaded")
                 
+                # محاولة تشغيل الفيديو أو الضغط على iFrame إذا وجد
                 try:
                     page.wait_for_selector("iframe", timeout=20000)
                     page.mouse.click(500, 300) 
@@ -70,6 +90,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                     page.mouse.click(500, 300)
                 except: pass
 
+                # انتظار البيانات لمدة أقصاها 15 ثانية تقريباً
                 for _ in range(150):
                     if movie_data: break
                     page.wait_for_timeout(100)
@@ -77,6 +98,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             except Exception as e:
                 logs.append(f"❌ Navigation Error: {str(e)}")
 
+            # التقاط صورة في حال الفشل (قد تظهر الصفحة بيضاء أو غير منسقة بسبب منع CSS وهذا طبيعي)
             if not movie_data:
                 try:
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
@@ -100,7 +122,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             return {"success": False, "error": f"Browser Error: {str(e)}", "trace": traceback.format_exc()}
 
 # ==============================================================================
-# 👇 الواجهة الأمامية الجديدة: صفحة لفحص الروابط بسهولة 👇
+# 👇 الواجهة الأمامية: صفحة لفحص الروابط بسهولة 👇
 # ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -131,7 +153,7 @@ def home():
                     var input = document.getElementById("movieUrl").value;
                     if (!input) { alert("Please paste a URL!"); return; }
                     
-                    // هذا السطر هو السر: تشفير الرابط ليصبح آمناً للإرسال
+                    // تشفير الرابط ليصبح آمناً للإرسال
                     var encodedUrl = encodeURIComponent(input);
                     
                     // توجيه المتصفح للرابط المشفر
@@ -155,7 +177,7 @@ def get_movie_api(request: Request, response: Response):
         if "url=" in raw_query_string:
             # استخراج الرابط
             target_url = raw_query_string.split("url=", 1)[1]
-            # فك التشفير (مهم جداً الآن لأن الصفحة الجديدة سترسله مشفراً)
+            # فك التشفير
             decoded_url = unquote(target_url)
             
             debug_logs.append(f"✂️ After Parsing & Decoding: {decoded_url}")
