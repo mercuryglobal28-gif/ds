@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from playwright.sync_api import sync_playwright
 import uvicorn
 import os
@@ -8,15 +8,13 @@ from urllib.parse import unquote
 
 app = FastAPI()
 
-# البروكسي (تأكد من أنه يعمل)
+# البروكسي (تأكد من أنه لا يزال يعمل، إذا توقف استبدله بجديد)
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-def scrape_movie_data(full_url: str, debug_logs: list):
-    logs = debug_logs
+def scrape_movie_data(full_url: str):
+    logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    
-    # تسجيل الرابط النهائي الذي سيستخدمه المتصفح
-    logs.append(f"🔗 Browser Navigating to: {full_url}")
+    logs.append(f"🔗 Processing URL: {full_url}") # سيظهر هنا الرابط كاملاً الآن
     
     movie_data = None
     snapshot = ""
@@ -40,6 +38,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             context.set_default_timeout(90000) 
             page = context.new_page()
 
+            # المصيدة
             def handle_response(response):
                 nonlocal movie_data
                 try:
@@ -55,6 +54,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                          if not movie_data:
                              movie_data = {"direct_m3u8": response.url}
                              logs.append("✅ Direct M3U8 Found")
+
                 except: pass
 
             page.on("response", handle_response)
@@ -64,13 +64,17 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                 logs.append("⏳ Loading Page...")
                 page.goto(full_url, wait_until="domcontentloaded")
                 
+                # التعامل مع المشغل
                 try:
-                    page.wait_for_selector("iframe", timeout=20000)
+                    # محاولة العثور على زر التشغيل وضغطه
+                    # نستخدم Timeout قصير هنا حتى لا نضيع وقتاً طويلاً
+                    page.wait_for_selector("iframe", timeout=15000)
                     page.mouse.click(500, 300) 
                     page.wait_for_timeout(1000)
                     page.mouse.click(500, 300)
                 except: pass
 
+                # انتظار البيانات
                 for _ in range(150):
                     if movie_data: break
                     page.wait_for_timeout(100)
@@ -98,49 +102,33 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                 }
 
         except Exception as e:
-            return {"success": False, "error": f"Browser Error: {str(e)}", "trace": traceback.format_exc()}
+            return {"success": False, "error": str(e), "trace": traceback.format_exc()}
 
 @app.get("/")
 def home():
     return {"status": "Active", "proxy": WORKING_PROXY}
 
+# ==============================================================================
+# 👇 الحل السحري هنا 👇
+# ==============================================================================
 @app.get("/get-movie")
-def get_movie_api(request: Request, response: Response):
-    # قائمة السجلات (Logs) لتعقب المشكلة من البداية
-    debug_logs = []
+async def get_movie_api(request: Request):
+    # نأخذ النص الخام للرابط بالكامل (query string)
+    raw_query = str(request.url.query)
     
-    try:
-        # 1. قراءة البيانات الخام كما وصلت من الشبكة
-        raw_query_bytes = request.scope['query_string']
-        raw_query_string = raw_query_bytes.decode("utf-8")
+    # نبحث عن كلمة "url=" ونأخذ كل شيء يأتي بعدها
+    # هذا يضمن أخذ الرابط بما فيه من رموز & و =
+    if "url=" in raw_query:
+        # نقسم النص عند أول ظهور لـ "url=" ونأخذ الجزء الثاني
+        target_url = raw_query.split("url=", 1)[1]
         
-        # تسجيل ما وصل بالضبط للمساعدة في التشخيص
-        debug_logs.append(f"🔍 Server Received Raw: {raw_query_string}")
+        # إذا كان الرابط مشفراً (يبدأ بـ http%3A%2F%2F) نقوم بفك تشفيره
+        # أما إذا كان عادياً فسيظل كما هو
+        decoded_url = unquote(target_url)
         
-        if "url=" in raw_query_string:
-            # التقسيم اليدوي لأخذ كل شيء بعد url=
-            target_url = raw_query_string.split("url=", 1)[1]
-            
-            # فك التشفير (اختياري، لكن مفيد إذا كان الرابط مشفراً)
-            decoded_url = unquote(target_url)
-            
-            # تسجيل الرابط بعد المعالجة
-            debug_logs.append(f"✂️ After Parsing: {decoded_url}")
-            
-            return scrape_movie_data(decoded_url, debug_logs)
-        
-        response.status_code = 400
-        return {"error": "Missing url parameter", "logs": debug_logs}
-
-    except Exception as e:
-        response.status_code = 200
-        return {
-            "success": False,
-            "error": "Server Error",
-            "details": str(e),
-            "logs": debug_logs,
-            "trace": traceback.format_exc()
-        }
+        return scrape_movie_data(decoded_url)
+    
+    return {"error": "Missing url parameter. Usage: /get-movie?url=YOUR_LINK"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
