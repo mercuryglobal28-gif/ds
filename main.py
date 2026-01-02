@@ -8,13 +8,15 @@ from urllib.parse import unquote
 
 app = FastAPI()
 
-# البروكسي المعتمد
+# البروكسي (تأكد من أنه يعمل)
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-def scrape_movie_data(full_url: str):
-    logs = []
+def scrape_movie_data(full_url: str, debug_logs: list):
+    logs = debug_logs
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Targeted URL: {full_url}") # تأكد من السجل هنا
+    
+    # تسجيل الرابط النهائي الذي سيستخدمه المتصفح
+    logs.append(f"🔗 Browser Navigating to: {full_url}")
     
     movie_data = None
     snapshot = ""
@@ -60,7 +62,6 @@ def scrape_movie_data(full_url: str):
 
             try:
                 logs.append("⏳ Loading Page...")
-                # نفتح الرابط الكامل
                 page.goto(full_url, wait_until="domcontentloaded")
                 
                 try:
@@ -103,34 +104,33 @@ def scrape_movie_data(full_url: str):
 def home():
     return {"status": "Active", "proxy": WORKING_PROXY}
 
-# ==============================================================================
-# 👇 الحل الجذري (Low-Level Reading) 👇
-# ==============================================================================
 @app.get("/get-movie")
 def get_movie_api(request: Request, response: Response):
+    # قائمة السجلات (Logs) لتعقب المشكلة من البداية
+    debug_logs = []
+    
     try:
-        # نقرأ البايتات الخام مباشرة من بروتوكول الشبكة (ASGI Scope)
-        # هذا يتجاوز أي تحليل أو تقسيم يقوم به السيرفر
+        # 1. قراءة البيانات الخام كما وصلت من الشبكة
         raw_query_bytes = request.scope['query_string']
-        
-        # نحول البايتات إلى نص
         raw_query_string = raw_query_bytes.decode("utf-8")
         
-        # الآن لدينا الرابط كما خرج من جهازك تماماً
+        # تسجيل ما وصل بالضبط للمساعدة في التشخيص
+        debug_logs.append(f"🔍 Server Received Raw: {raw_query_string}")
+        
         if "url=" in raw_query_string:
-            # نقسم يدوياً
+            # التقسيم اليدوي لأخذ كل شيء بعد url=
             target_url = raw_query_string.split("url=", 1)[1]
             
-            # فك التشفير إذا لزم الأمر
+            # فك التشفير (اختياري، لكن مفيد إذا كان الرابط مشفراً)
             decoded_url = unquote(target_url)
             
-            # تنظيف الرابط من أي مخلفات قد يضيفها المتصفح في النهاية
-            decoded_url = decoded_url.strip()
+            # تسجيل الرابط بعد المعالجة
+            debug_logs.append(f"✂️ After Parsing: {decoded_url}")
             
-            return scrape_movie_data(decoded_url)
+            return scrape_movie_data(decoded_url, debug_logs)
         
         response.status_code = 400
-        return {"error": "Missing url parameter", "received_raw": raw_query_string}
+        return {"error": "Missing url parameter", "logs": debug_logs}
 
     except Exception as e:
         response.status_code = 200
@@ -138,6 +138,7 @@ def get_movie_api(request: Request, response: Response):
             "success": False,
             "error": "Server Error",
             "details": str(e),
+            "logs": debug_logs,
             "trace": traceback.format_exc()
         }
 
