@@ -7,19 +7,20 @@ import base64
 
 app = FastAPI()
 
-# البروكسي (تأكد أنه لا يزال حياً، إذا فشل جرب غيره)
+# البروكسي الذي أثبت نجاحه في جلب الصفحة الروسية
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-def scrape_movie_data(target_url: str):
+def scrape_movie_data(full_url: str):
     logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
+    logs.append(f"🔗 Full URL: {full_url}")
     
     movie_data = None
     snapshot = ""
-    html_dump = ""
     
     with sync_playwright() as p:
         try:
+            # تشغيل المتصفح مع البروكسي
             browser = p.chromium.launch(
                 headless=True,
                 proxy={"server": WORKING_PROXY},
@@ -29,84 +30,70 @@ def scrape_movie_data(target_url: str):
                 ]
             )
             
-            # إعداد سياق بمتصفح كامل
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 locale="ru-RU", 
                 timezone_id="Europe/Moscow"
             )
-            context.set_default_timeout(60000) # 60 ثانية مهلة
+            # زيادة المهلة لضمان تحميل الصفحة الثقيلة
+            context.set_default_timeout(90000) 
             page = context.new_page()
 
-            # المصيدة
+            # المصيدة: التقاط أي رابط فيديو (M3U8) أو ملف JSON يظهر في الشبكة
             def handle_response(response):
                 nonlocal movie_data
-                # توسيع المصيدة لتشمل كل احتمالات ملفات الفيديو
-                if response.status == 200 and ("bnsi/movies" in response.url or "master.m3u8" in response.url or "index.m3u8" in response.url):
-                    try:
-                        # إذا كان ملف JSON
-                        if "application/json" in response.headers.get("content-type", ""):
-                            data = response.json()
-                            if "hlsSource" in data:
-                                movie_data = data
-                                logs.append("✅ JSON Data Captured!")
-                        
-                        # إذا كان ملف M3U8 مباشر
-                        elif "m3u8" in response.url:
+                try:
+                    # 1. البحث عن ملفات JSON الخاصة بالفيلم
+                    if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
+                        data = response.json()
+                        if "hlsSource" in data or "file" in data:
+                            movie_data = data
+                            logs.append("✅ JSON Data Captured!")
+                    
+                    # 2. البحث المباشر عن روابط التشغيل m3u8 (حتى لو لم تظهر في JSON)
+                    if "m3u8" in response.url and "master" in response.url:
+                         logs.append(f"✅ Direct M3U8 Found: {response.url}")
+                         if not movie_data:
                              movie_data = {"direct_m3u8": response.url}
-                             logs.append("✅ M3U8 Link Captured!")
-                    except: pass
+
+                except: pass
 
             page.on("response", handle_response)
             
-            # حظر الصور لتسريع التحميل
+            # حظر الصور والخطوط لتسريع الصفحة
             page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font"] else r.continue_())
 
             try:
-                logs.append("⏳ Loading Main Page...")
-                # نفتح الرابط الأصلي الكامل (وليس المختصر)
-                page.goto(target_url, wait_until="domcontentloaded")
+                logs.append("⏳ Loading Page...")
+                # فتح الرابط كما هو بالضبط دون تعديل
+                page.goto(full_url, wait_until="domcontentloaded")
                 
-                # 👇 الحل لمشكلة الشاشة البيضاء 👇
-                logs.append("👀 Waiting for Player Iframe...")
-                
-                # ننتظر ظهور الـ iframe
+                # محاولة التعامل مع المشغل (Iframe)
                 try:
-                    iframe_element = page.wait_for_selector("iframe", timeout=30000)
-                    if iframe_element:
-                        logs.append("✅ Iframe Found! Entering...")
-                        frame = iframe_element.content_frame()
-                        
-                        if frame:
-                            # ننتظر قليلاً ثم نضغط داخل الإطار
-                            page.wait_for_timeout(2000)
-                            try:
-                                # محاولة ضغط زر التشغيل داخل الإطار
-                                frame.click("body", position={"x": 500, "y": 300}, force=True)
-                                logs.append("🖱️ Clicked inside Iframe")
-                            except:
-                                logs.append("⚠️ Could not click inside frame (might be auto-play)")
-                    else:
-                        logs.append("⚠️ No Iframe found on page")
-                        
-                except Exception as e:
-                    logs.append(f"⚠️ Iframe wait error: {str(e)}")
+                    # ننتظر ظهور الإطار
+                    page.wait_for_selector("iframe", timeout=20000)
+                    
+                    # محاكاة نقرات لتفعيل الفيديو
+                    page.mouse.click(500, 300)
+                    page.wait_for_timeout(2000)
+                    page.mouse.click(500, 300)
+                except: 
+                    logs.append("⚠️ Could not click play button (might be autoplay)")
 
-                # انتظار البيانات
-                logs.append("⏳ Waiting for API response...")
-                for _ in range(150):
+                # الانتظار حتى تظهر البيانات
+                for _ in range(150): # 15 ثانية
                     if movie_data: break
                     page.wait_for_timeout(100)
 
             except Exception as e:
                 logs.append(f"❌ Navigation Error: {str(e)}")
 
-            # إذا فشل، نحفظ HTML لنفهم السبب
+            # إذا فشل، نلتقط صورة لنرى هل تغيرت رسالة الخطأ
             if not movie_data:
                 try:
-                    html_dump = page.content()[:1000] # أول 1000 حرف
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
                     snapshot = base64.b64encode(screenshot_bytes).decode('utf-8')
+                    logs.append("📸 Screenshot captured")
                 except: pass
 
             browser.close()
@@ -116,9 +103,8 @@ def scrape_movie_data(target_url: str):
             else:
                 return {
                     "success": False, 
-                    "error": "Timeout", 
-                    "logs": logs, 
-                    "html_preview": html_dump, # سيخبرنا هل الصفحة محظورة
+                    "error": "No Data Found", 
+                    "logs": logs,
                     "screenshot_base64": snapshot
                 }
 
@@ -127,10 +113,11 @@ def scrape_movie_data(target_url: str):
 
 @app.get("/")
 def home():
-    return {"status": "Active"}
+    return {"status": "Active", "proxy": WORKING_PROXY}
 
 @app.get("/get-movie")
 def get_movie_api(url: str = Query(..., description="Full URL")):
+    # نمرر الرابط مباشرة للدالة
     return scrape_movie_data(url)
 
 if __name__ == "__main__":
