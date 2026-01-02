@@ -7,119 +7,117 @@ from urllib.parse import urlparse, parse_qs
 
 app = FastAPI()
 
-# البروكسي الذي أثبت كفاءته
+# ==============================================================================
+# 🎯 البروكسي الذي يعمل (بناءً على فحوصاتنا السابقة)
+# ==============================================================================
 WORKING_PROXY = "http://176.126.103.194:44214"
+# ==============================================================================
 
 def get_real_url(original_url: str):
     """
-    وظيفة لاستخراج الرابط الحقيقي من داخل الرابط الطويل
+    وظيفة مساعدة: تستخرج الرابط الحقيقي من الرابط الطويل لتسريع العملية
     """
     try:
-        parsed = urlparse(original_url)
-        query_params = parse_qs(parsed.query)
-        
-        # هل يوجد باراميتر اسمه url؟ (مثل الرابط الذي تستخدمه)
-        if "url" in query_params:
-            real_url = query_params["url"][0]
-            print(f"🎯 Smart Redirect: Found inner URL -> {real_url}")
-            return real_url
-        
-        # هل الرابط هو أصلاً الرابط المباشر؟
-        if "larkin" in original_url or "token_movie" in original_url:
-            return original_url
-            
-    except:
-        pass
-    
-    # إذا فشل الاستخراج، نستخدم الرابط الأصلي كما هو
+        if "url=" in original_url:
+            parsed = urlparse(original_url)
+            query_params = parse_qs(parsed.query)
+            if "url" in query_params:
+                return query_params["url"][0]
+    except: pass
     return original_url
 
 def scrape_movie_data(input_url: str):
-    logs = []
-    
-    # 1. استخراج الرابط المباشر (تجاوز الغلاف)
+    # 1. تجهيز الرابط المباشر
     target_url = get_real_url(input_url)
     
-    logs.append(f"🚀 Start: Connecting to {target_url}")
-    logs.append(f"🛡️ Proxy: {WORKING_PROXY}")
+    logs = [] # لتسجيل الأحداث في حال الخطأ
+    logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
+    logs.append(f"🔗 Target: {target_url}")
     
     movie_data = None
     
     with sync_playwright() as p:
         try:
-            # تشغيل المتصفح
+            # 2. تشغيل المتصفح مع البروكسي
             browser = p.chromium.launch(
                 headless=True,
                 proxy={"server": WORKING_PROXY},
                 args=[
                     "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled"
                 ]
             )
             
-            # إعداد السياق
+            # 3. إعداد السياق (روسيا)
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                locale="ru-RU", timezone_id="Europe/Moscow"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="ru-RU", 
+                timezone_id="Europe/Moscow"
             )
-            context.set_default_timeout(60000)
+            # زيادة وقت الانتظار لأن البروكسي قد يكون بطيئاً
+            context.set_default_timeout(60000) 
             page = context.new_page()
 
-            # 🕵️‍♂️ المصيدة
+            # 4. المصيدة (نفس المنطق في كودك المحلي)
             def handle_response(response):
                 nonlocal movie_data
-                # توسيع نطاق البحث ليشمل balanser وكافة طلبات الـ API
+                # نبحث عن bnsi/movies أو أي ملف JSON يحتوي على hlsSource
                 if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
                     try:
                         data = response.json()
-                        if "hlsSource" in data or "data" in data or "file" in data:
+                        if "hlsSource" in data or "name" in data.get("data", {}):
                             movie_data = data
-                            logs.append("✅ Data Captured Successfully!")
+                            logs.append("✅ Data Captured!")
                     except: pass
 
             page.on("response", handle_response)
             
-            # حظر الصور والخطوط
-            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font", "stylesheet"] else r.continue_())
+            # تسريع التصفح بحظر الصور
+            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "media", "font"] else r.continue_())
 
-            # 2. الذهاب للموقع
-            logs.append("⏳ Navigating...")
+            # 5. الذهاب للموقع
             try:
                 page.goto(target_url, wait_until="domcontentloaded")
-                logs.append(f"📄 Title: {page.title()}")
                 
-                # 3. محاولة التشغيل (مهمة جداً للمواقع المباشرة)
+                # التحقق من الحظر
+                if "Access Denied" in page.title():
+                     return {"success": False, "error": "Proxy Blocked (403)", "logs": logs}
+
+                # 6. محاكاة النقرات (من كودك الأصلي)
                 try: 
-                    # نقرات في وسط الشاشة لتشغيل المشغل
                     page.mouse.click(500, 300)
                     page.wait_for_timeout(1000)
                     page.mouse.click(500, 300)
                 except: pass
                 
                 # انتظار البيانات
-                for _ in range(150): # 15 ثانية
+                for _ in range(200): # انتظار حتى 20 ثانية
                     if movie_data: break
                     page.wait_for_timeout(100)
 
             except Exception as e:
-                logs.append(f"❌ Nav Error: {str(e)}")
+                logs.append(f"❌ Navigation Error: {str(e)}")
 
             browser.close()
             
+            # 7. إرجاع النتيجة
             if movie_data:
-                return {"success": True, "data": movie_data}
+                # تنظيف البيانات (اختياري) لتقليل حجم الرد
+                return movie_data
             else:
-                return {"success": False, "diagnosis": "Timeout - No JSON found", "logs": logs}
+                return {"success": False, "error": "Timeout - No Data Found", "logs": logs}
 
         except Exception as e:
-            return {"success": False, "error": str(e), "logs": logs}
+            return {"success": False, "error": "Server/Browser Error", "details": str(e), "trace": traceback.format_exc()}
 
 @app.get("/")
 def home():
-    return {"status": "Active", "mode": "Smart Redirect"}
+    return {"status": "Active", "proxy": WORKING_PROXY}
 
 @app.get("/get-movie")
-def get_movie_api(url: str = Query(..., description="Full URL")):
+def get_movie_api(url: str = Query(..., description="Full Movie URL")):
     return scrape_movie_data(url)
 
 if __name__ == "__main__":
