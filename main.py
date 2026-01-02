@@ -1,384 +1,503 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from playwright.async_api import async_playwright
 import uvicorn
 import os
 import traceback
 import base64
 import asyncio
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs, urlencode
 import time
+import re
 
 app = FastAPI()
 
 # البروكسي المعتمد
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-# متغير للتحكم في وقت التوقف
-TARGET_FOUND = False
-
-async def scrape_movie_data(full_url: str, debug_logs: list):
+async def find_bnsi_movie_deep(url: str, debug_logs: list):
+    """بحث عميق عن ملفات bnsi/movies"""
     logs = debug_logs
-    logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Browser Navigating to: {full_url}")
-    
-    # إعادة تعيين حالة العثور
-    global TARGET_FOUND
-    TARGET_FOUND = False
-    
-    movie_data = None
-    snapshot = ""
+    logs.append(f"🔍 Deep search started for: {url}")
     
     try:
         async with async_playwright() as p:
+            # إعداد المتصفح مع تفعيل الـ proxy
             browser = await p.chromium.launch(
                 headless=True,
                 proxy={"server": WORKING_PROXY} if WORKING_PROXY else None,
                 args=[
                     "--no-sandbox",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-extensions",
-                    "--disable-gpu",
-                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--allow-running-insecure-content",
                 ],
                 timeout=30000
             )
             
+            # إنشاء context مع إعدادات متساهلة
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="ru-RU", 
-                timezone_id="Europe/Moscow",
+                locale="en-US",
+                viewport={"width": 1920, "height": 1080},
                 java_script_enabled=True,
-                ignore_https_errors=True
+                ignore_https_errors=True,
+                bypass_csp=True
             )
             
             page = await context.new_page()
-            page.set_default_timeout(10000)  # 10 ثواني فقط
+            page.set_default_timeout(15000)
             
-            # ==============================================================
-            # دالة الـ response handler المتخصصة
-            # ==============================================================
-            async def handle_target_response(response):
-                global TARGET_FOUND
-                
-                # إذا تم العثور على الملف المستهدف مسبقاً، تجاهل
-                if TARGET_FOUND:
-                    return
-                
-                try:
-                    url = response.url
-                    
-                    # 🔍 البحث عن الملف المستهدف فقط
-                    if "/bnsi/movies/" in url and response.status == 200:
-                        logs.append(f"🎯 Target File Found: {url}")
-                        
-                        try:
-                            # محاولة الحصول على محتوى JSON
-                            data = await response.json()
-                            logs.append(f"✅ JSON Data Captured: {len(str(data))} characters")
-                            
-                            # إعداد النتيجة وإيقاف البحث
-                            nonlocal movie_data
-                            movie_data = {
-                                "success": True,
-                                "type": "bnsi_movie_json",
-                                "url": url,
-                                "data": data,
-                                "content_length": len(str(data))
-                            }
-                            
-                            # تحديث حالة العثور لإيقاف المزيد من المعالجة
-                            TARGET_FOUND = True
-                            
-                            # إغلاق المتصفح فوراً
-                            logs.append("⚡ Target found - stopping immediately")
-                            await browser.close()
-                            
-                        except Exception as json_error:
-                            # إذا لم يكن JSON، حاول الحصول على النص
-                            try:
-                                text = await response.text()
-                                logs.append(f"📄 Text Data Captured: {len(text)} characters")
-                                
-                                movie_data = {
-                                    "success": True,
-                                    "type": "bnsi_movie_text",
-                                    "url": url,
-                                    "data_preview": text[:500],  # أول 500 حرف فقط
-                                    "full_length": len(text)
-                                }
-                                
-                                TARGET_FOUND = True
-                                logs.append("⚡ Target found (text) - stopping immediately")
-                                await browser.close()
-                                
-                            except Exception as text_error:
-                                logs.append(f"⚠️ Could not read response content: {text_error}")
-                                
-                except Exception as e:
-                    logs.append(f"❌ Error in response handler: {str(e)}")
+            # تخزين جميع الـ responses
+            all_responses = []
+            target_responses = []
             
-            # إضافة الـ handler
-            page.on("response", lambda response: asyncio.create_task(handle_target_response(response)))
+            # 1. جمع جميع الـ responses التي تحتوي على bnsi
+            page.on("response", lambda response: all_responses.append(response))
             
-            # ==============================================================
-            # تحسين الـ route handling لتسريع العملية
-            # ==============================================================
-            async def fast_route_handler(route):
-                """حجب كل شيء ما عدا المهم جداً"""
-                url = route.request.url
-                
-                # السماح فقط بـ:
-                # 1. الصفحة الرئيسية
-                # 2. ملفات الـ API التي نبحث عنها
-                # 3. ملفات JavaScript الضرورية
-                
-                if full_url in url or "/bnsi/movies/" in url:
-                    await route.continue_()
-                elif route.request.resource_type in ["script", "document"]:
-                    # السماح لبعض الـ scripts فقط
-                    await route.continue_()
-                else:
-                    # حجب كل شيء آخر
-                    await route.abort()
+            logs.append("🌐 Navigating to URL...")
             
-            await context.route("**/*", fast_route_handler)
-            
-            # ==============================================================
-            # عملية التحميل السريعة
-            # ==============================================================
             try:
-                logs.append("⏳ Loading page (fast mode)...")
-                
-                # تحميل الصفحة بدون انتظار طويل
-                response = await page.goto(full_url, wait_until="domcontentloaded", timeout=8000)
-                
-                if response and response.status != 200:
-                    logs.append(f"⚠️ HTTP Status: {response.status}")
-                
-                # انتظار قصير جداً لالتقاط الردود
-                wait_time = 0
-                max_wait_time = 5  # أقصى انتظار 5 ثواني
-                
-                while not TARGET_FOUND and wait_time < max_wait_time:
-                    await asyncio.sleep(0.5)
-                    wait_time += 0.5
-                    
-                    # كل ثانية، تحقق مما إذا وجدنا الملف
-                    if wait_time % 1 == 0:
-                        logs.append(f"⏰ Waiting... {wait_time:.1f}s")
-                
-                if TARGET_FOUND:
-                    logs.append("🎉 Target found successfully!")
-                    return movie_data
-                    
+                # الانتقال إلى الصفحة
+                main_response = await page.goto(url, wait_until="networkidle", timeout=15000)
+                if main_response:
+                    logs.append(f"📄 Main page loaded: {main_response.status}")
             except Exception as e:
-                logs.append(f"❌ Navigation Error: {str(e)}")
+                logs.append(f"⚠️ Navigation warning: {str(e)}")
             
-            # ==============================================================
-            # إذا لم نجد الملف المستهدف
-            # ==============================================================
-            if not TARGET_FOUND:
-                logs.append("🔍 No target file found, trying alternative methods...")
-                
-                # محاولة بديلة: البحث في الشبكة يدوياً
+            # انتظار قصير
+            await asyncio.sleep(3)
+            
+            # 2. البحث في iframes
+            logs.append("🔎 Checking for iframes...")
+            iframes = await page.query_selector_all("iframe")
+            logs.append(f"Found {len(iframes)} iframes")
+            
+            for i, iframe in enumerate(iframes):
                 try:
-                    # الحصول على جميع الردود التي تم استقبالها
-                    responses = []
-                    
-                    # طريقة بسيطة للبحث عن الملف
-                    content = await page.content()
-                    if "/bnsi/movies/" in content:
-                        logs.append("ℹ️ Found /bnsi/movies/ reference in page HTML")
+                    frame_src = await iframe.get_attribute("src")
+                    if frame_src:
+                        logs.append(f"  Iframe {i+1}: {frame_src}")
                         
-                        # استخراج الأرقام المحتملة
-                        import re
-                        movie_patterns = re.findall(r'/bnsi/movies/(\d+)', content)
-                        if movie_patterns:
-                            logs.append(f"🔢 Found {len(movie_patterns)} movie IDs in HTML: {movie_patterns[:5]}")
-                    
-                except Exception as e:
-                    logs.append(f"⚠️ Alternative search failed: {str(e)}")
-                
-                # لقطة شاشة للتصحيح
-                try:
-                    screenshot_bytes = await page.screenshot(type='jpeg', quality=30)
-                    snapshot = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    logs.append("📸 Screenshot captured for debugging")
+                        # إذا كان الـ iframe يحتوي على stloadi، فاذهب إليه مباشرة
+                        if "stloadi.live" in frame_src:
+                            logs.append(f"  🎯 Found stloadi iframe, navigating...")
+                            await page.goto(frame_src, wait_until="networkidle", timeout=10000)
+                            await asyncio.sleep(2)
                 except:
                     pass
             
+            # 3. البحث في محتوى الصفحة عن روابط bnsi
+            logs.append("🔍 Searching page content for bnsi patterns...")
+            page_content = await page.content()
+            
+            # البحث عن أنماط مختلفة لـ bnsi
+            bnsi_patterns = re.findall(r'(https?://[^"\']+?/bnsi/movies/\d+)', page_content)
+            if bnsi_patterns:
+                logs.append(f"✅ Found {len(bnsi_patterns)} bnsi URLs in page source")
+                for pattern in bnsi_patterns[:3]:  # أول 3 فقط
+                    logs.append(f"  📍 {pattern}")
+                    
+                    # محاولة الوصول إلى الرابط مباشرة
+                    try:
+                        logs.append(f"  🔗 Attempting direct access...")
+                        direct_response = await page.goto(pattern, wait_until="networkidle", timeout=10000)
+                        
+                        if direct_response:
+                            # محاولة الحصول على المحتوى
+                            try:
+                                content = await direct_response.text()
+                                logs.append(f"  📊 Direct access successful: {len(content)} chars")
+                                
+                                # تحقق إذا كان JSON
+                                try:
+                                    json_data = await direct_response.json()
+                                    return {
+                                        "success": True,
+                                        "found": True,
+                                        "type": "direct_json",
+                                        "url": pattern,
+                                        "data": json_data,
+                                        "source": "direct_url_in_page"
+                                    }
+                                except:
+                                    # إذا لم يكن JSON، أرجع جزء من النص
+                                    return {
+                                        "success": True,
+                                        "found": True,
+                                        "type": "direct_text",
+                                        "url": pattern,
+                                        "data_preview": content[:1000],
+                                        "full_length": len(content),
+                                        "source": "direct_url_in_page"
+                                    }
+                            except:
+                                pass
+                    except Exception as e:
+                        logs.append(f"  ❌ Direct access failed: {str(e)}")
+            
+            # 4. تحليل الـ responses المجمعة
+            logs.append(f"📊 Analyzing {len(all_responses)} collected responses...")
+            
+            for i, response in enumerate(all_responses):
+                try:
+                    response_url = response.url
+                    
+                    # البحث عن bnsi في الـ URLs
+                    if "/bnsi/movies/" in response_url:
+                        logs.append(f"🎯 Found bnsi response #{i+1}: {response_url}")
+                        
+                        # محاولة الحصول على المحتوى
+                        try:
+                            # أولاً كـ JSON
+                            json_data = await response.json()
+                            logs.append(f"  ✅ JSON data captured: {len(str(json_data))} chars")
+                            
+                            await browser.close()
+                            return {
+                                "success": True,
+                                "found": True,
+                                "type": "response_json",
+                                "url": response_url,
+                                "data": json_data,
+                                "response_index": i+1
+                            }
+                            
+                        except:
+                            # إذا لم يكن JSON، حاول كـ نص
+                            try:
+                                text = await response.text()
+                                logs.append(f"  📄 Text data captured: {len(text)} chars")
+                                
+                                await browser.close()
+                                return {
+                                    "success": True,
+                                    "found": True,
+                                    "type": "response_text",
+                                    "url": response_url,
+                                    "data_preview": text[:1000],
+                                    "full_length": len(text),
+                                    "response_index": i+1
+                                }
+                            except Exception as e:
+                                logs.append(f"  ⚠️ Could not read response: {str(e)}")
+                                
+                except Exception as e:
+                    continue
+            
+            # 5. محاولة تنفيذ JavaScript للعثور على الروابط
+            logs.append("🤖 Executing JavaScript to find movie data...")
+            
+            try:
+                # البحث عن عناصر الفيديو والمشغلات
+                js_result = await page.evaluate("""
+                    () => {
+                        const results = {
+                            videos: [],
+                            iframes: [],
+                            scripts: [],
+                            network_requests: []
+                        };
+                        
+                        // البحث عن فيديوهات
+                        document.querySelectorAll('video').forEach(video => {
+                            if (video.src) results.videos.push(video.src);
+                            video.querySelectorAll('source').forEach(source => {
+                                if (source.src) results.videos.push(source.src);
+                            });
+                        });
+                        
+                        // البحث عن iframes
+                        document.querySelectorAll('iframe').forEach(iframe => {
+                            if (iframe.src) results.iframes.push(iframe.src);
+                        });
+                        
+                        // البحث عن scripts تحتوي على bnsi
+                        document.querySelectorAll('script').forEach(script => {
+                            if (script.src && script.src.includes('bnsi')) {
+                                results.scripts.push(script.src);
+                            }
+                            if (script.textContent && script.textContent.includes('bnsi')) {
+                                results.scripts.push('inline: ' + script.textContent.substring(0, 200));
+                            }
+                        });
+                        
+                        // محاولة الحصول على طلبات الشبكة من window
+                        if (window.performance && window.performance.getEntriesByType) {
+                            window.performance.getEntriesByType('resource').forEach(resource => {
+                                if (resource.name.includes('bnsi')) {
+                                    results.network_requests.push(resource.name);
+                                }
+                            });
+                        }
+                        
+                        return results;
+                    }
+                """)
+                
+                logs.append(f"🤖 JS found: {len(js_result['videos'])} videos, {len(js_result['iframes'])} iframes")
+                
+                # التحقق مما إذا وجدنا شيء مفيد
+                if js_result['scripts']:
+                    logs.append(f"📜 Found {len(js_result['scripts'])} scripts with bnsi")
+                    for script in js_result['scripts'][:2]:
+                        logs.append(f"  📝 {script[:100]}...")
+                        
+                if js_result['network_requests']:
+                    logs.append(f"🌐 Found {len(js_result['network_requests'])} network requests")
+                    for req in js_result['network_requests'][:2]:
+                        logs.append(f"  🔗 {req}")
+                        
+            except Exception as e:
+                logs.append(f"⚠️ JavaScript execution failed: {str(e)}")
+            
+            # 6. أخذ لقطة شاشة للتصحيح
+            logs.append("📸 Taking screenshot for debugging...")
+            try:
+                screenshot = await page.screenshot(type='jpeg', quality=40)
+                screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
+                logs.append("✅ Screenshot captured")
+            except Exception as e:
+                screenshot_b64 = ""
+                logs.append(f"❌ Screenshot failed: {str(e)}")
+            
             await browser.close()
             
-            if movie_data:
-                return movie_data
-            else:
-                return {
-                    "success": False, 
-                    "error": "Target file (/bnsi/movies/) not found", 
-                    "logs": logs,
-                    "screenshot_base64": snapshot
-                }
-
+            # 7. إذا لم نجد شيئاً، نعيد معلومات التصحيح
+            return {
+                "success": False,
+                "found": False,
+                "message": "Could not find bnsi/movies file despite deep search",
+                "debug_info": {
+                    "total_responses": len(all_responses),
+                    "page_size": len(page_content),
+                    "iframes_found": len(iframes),
+                    "bnsi_patterns_in_source": len(bnsi_patterns),
+                    "screenshot_available": bool(screenshot_b64)
+                },
+                "logs": logs,
+                "screenshot_base64": screenshot_b64[:50000] if screenshot_b64 else ""  # جزء فقط لتجنب حجم كبير
+            }
+            
     except Exception as e:
+        logs.append(f"❌ Critical error: {str(e)}")
         return {
-            "success": False, 
-            "error": f"Browser Error: {str(e)}", 
+            "success": False,
+            "found": False,
+            "error": str(e),
             "trace": traceback.format_exc(),
             "logs": logs
         }
 
+async def extract_movie_from_token_url(token_url: str, debug_logs: list):
+    """محاولة استخراج فيديو مباشرة من رابط token"""
+    logs = debug_logs
+    logs.append(f"🎯 Attempting direct token extraction: {token_url}")
+    
+    try:
+        # تحليل الرابط
+        parsed = urlparse(token_url)
+        query_params = parse_qs(parsed.query)
+        
+        # البحث عن token_movie أو token
+        movie_token = None
+        if 'token_movie' in query_params:
+            movie_token = query_params['token_movie'][0]
+        elif 'token' in query_params:
+            movie_token = query_params['token'][0]
+        
+        if movie_token:
+            logs.append(f"🔑 Found movie token: {movie_token}")
+            
+            # محاولة إنشاء رابط bnsi محتمل
+            # هذا يعتمد على بنية الموقع
+            possible_bnsi_urls = [
+                f"https://harald-as.stloadi.live/bnsi/movies/{movie_token}",
+                f"https://harald-as.stloadi.live/bnsi/movies/224656",  # مثال
+                f"https://larkin-as.stloadi.live/bnsi/movies/{movie_token}",
+                f"https://larkin-as.stloadi.live/bnsi/movies/224656",
+            ]
+            
+            # جرب كل رابط
+            for test_url in possible_bnsi_urls:
+                logs.append(f"🔗 Testing possible URL: {test_url}")
+                
+                try:
+                    async with async_playwright() as p:
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            proxy={"server": WORKING_PROXY} if WORKING_PROXY else None,
+                            args=["--no-sandbox"],
+                            timeout=10000
+                        )
+                        
+                        page = await browser.new_page()
+                        page.set_default_timeout(7000)
+                        
+                        response = await page.goto(test_url, wait_until="networkidle", timeout=7000)
+                        
+                        if response and response.status == 200:
+                            try:
+                                json_data = await response.json()
+                                await browser.close()
+                                
+                                return {
+                                    "success": True,
+                                    "found": True,
+                                    "type": "direct_token_url",
+                                    "original_token": movie_token,
+                                    "url": test_url,
+                                    "data": json_data
+                                }
+                            except:
+                                try:
+                                    text = await response.text()
+                                    await browser.close()
+                                    
+                                    return {
+                                        "success": True,
+                                        "found": True,
+                                        "type": "direct_token_text",
+                                        "original_token": movie_token,
+                                        "url": test_url,
+                                        "data_preview": text[:1000]
+                                    }
+                                except:
+                                    pass
+                        
+                        await browser.close()
+                        
+                except Exception as e:
+                    logs.append(f"  ⚠️ Test failed: {str(e)}")
+                    continue
+        
+        return {"success": False, "message": "Could not extract from token"}
+        
+    except Exception as e:
+        logs.append(f"❌ Token extraction error: {str(e)}")
+        return {"success": False, "error": str(e)}
+
 # ==============================================================================
-# واجهة API سريعة ومحسنة
+# واجهات API
 # ==============================================================================
-@app.get("/get-movie")
-async def get_movie_api(request: Request, response: Response):
+@app.get("/deep-find-bnsi")
+async def deep_find_bnsi(request: Request):
+    """واجهة البحث العميق"""
     debug_logs = []
     start_time = time.time()
     
     try:
-        # قراءة الرابط الخام
-        raw_query_bytes = request.scope['query_string']
-        raw_query_string = raw_query_bytes.decode("utf-8")
-        
-        debug_logs.append(f"🔍 Server Received Raw: {raw_query_string}")
-        
-        if "url=" in raw_query_string:
-            # استخراج الرابط
-            target_url = raw_query_string.split("url=", 1)[1]
-            # فك التشفير
-            decoded_url = unquote(target_url)
-            
-            debug_logs.append(f"🎯 Target URL: {decoded_url}")
-            debug_logs.append(f"🔎 Looking for: /bnsi/movies/ files")
-            
-            # تنفيذ عملية الـ scraping
-            result = await scrape_movie_data(decoded_url, debug_logs)
-            
-            # حساب الوقت المستغرق
-            elapsed_time = time.time() - start_time
-            debug_logs.append(f"⏱️ Total processing time: {elapsed_time:.2f} seconds")
-            
-            # إضافة الوقت للنتيجة
-            if isinstance(result, dict):
-                result["processing_time"] = f"{elapsed_time:.2f}s"
-                result["logs"] = debug_logs + (result.get("logs", []))
-            
-            return result
-        
-        response.status_code = 400
-        return {"error": "Missing url parameter", "logs": debug_logs}
-
-    except Exception as e:
-        response.status_code = 200
-        return {
-            "success": False,
-            "error": "Server Error",
-            "details": str(e),
-            "logs": debug_logs,
-            "trace": traceback.format_exc()
-        }
-
-# ==============================================================================
-# واجهة خاصة للبحث عن الملفات المحددة فقط
-# ==============================================================================
-@app.get("/find-bnsi-movie")
-async def find_bnsi_movie(url: str, movie_id: str = None):
-    """واجهة مخصصة للبحث عن ملفات bnsi/movies فقط"""
-    start_time = time.time()
-    logs = []
-    
-    logs.append(f"🎯 Starting targeted search for bnsi/movies file")
-    logs.append(f"🔗 URL: {url}")
-    if movie_id:
-        logs.append(f"🔢 Looking for movie ID: {movie_id}")
-    
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                proxy={"server": WORKING_PROXY} if WORKING_PROXY else None,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                timeout=15000
+        # استخراج الـ URL من query string
+        query_string = request.scope['query_string'].decode("utf-8")
+        if "url=" not in query_string:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Missing url parameter"}
             )
-            
-            page = await browser.new_page()
-            page.set_default_timeout(7000)  # 7 ثواني فقط
-            
-            target_found = False
-            result_data = None
-            
-            async def targeted_response_handler(response):
-                nonlocal target_found, result_data
-                
-                if target_found:
-                    return
-                
-                resp_url = response.url
-                
-                # البحث عن الملف المحدد
-                if "/bnsi/movies/" in resp_url:
-                    if movie_id and movie_id in resp_url:
-                        logs.append(f"✅ Found specific movie {movie_id}: {resp_url}")
-                    elif not movie_id:
-                        logs.append(f"✅ Found bnsi movie file: {resp_url}")
-                    
-                    try:
-                        # محاولة الحصول على JSON
-                        data = await response.json()
-                        result_data = data
-                        logs.append(f"📊 JSON data captured: {len(str(data))} chars")
-                    except:
-                        # محاولة الحصول على نص
-                        try:
-                            text = await response.text()
-                            result_data = {"text_content": text[:1000]}
-                            logs.append(f"📄 Text data captured: {len(text)} chars")
-                        except Exception as e:
-                            logs.append(f"⚠️ Could not read response: {e}")
-                    
-                    target_found = True
-                    
-                    # إغلاق المتصفح فوراً
-                    await browser.close()
-            
-            page.on("response", lambda r: asyncio.create_task(targeted_response_handler(r)))
-            
-            # تحميل الصفحة بسرعة
-            await page.goto(url, wait_until="networkidle", timeout=7000)
-            
-            # انتظار قصير جداً
-            await asyncio.sleep(2)
-            
-            if not target_found:
-                await browser.close()
-            
-            elapsed = time.time() - start_time
-            
-            if target_found and result_data:
-                return {
-                    "success": True,
-                    "found": True,
-                    "data": result_data,
-                    "time": f"{elapsed:.2f}s",
-                    "logs": logs
-                }
-            else:
-                return {
-                    "success": False,
-                    "found": False,
-                    "message": "No bnsi/movies file found",
-                    "time": f"{elapsed:.2f}s",
-                    "logs": logs
-                }
-                
+        
+        target_url = unquote(query_string.split("url=", 1)[1])
+        debug_logs.append(f"🎯 Target URL: {target_url}")
+        
+        # 1. أولاً: حاول استخراج من token إذا كان موجوداً
+        if "token_movie" in target_url or "token=" in target_url:
+            token_result = await extract_movie_from_token_url(target_url, debug_logs)
+            if token_result.get("success") and token_result.get("found"):
+                debug_logs.append("✅ Found via token extraction!")
+                return token_result
+        
+        # 2. ثانياً: البحث العميق في الصفحة
+        debug_logs.append("🔍 Starting deep page analysis...")
+        result = await find_bnsi_movie_deep(target_url, debug_logs)
+        
+        # إضافة وقت المعالجة
+        elapsed = time.time() - start_time
+        result["processing_time"] = f"{elapsed:.2f}s"
+        
+        return result
+        
     except Exception as e:
+        debug_logs.append(f"❌ API Error: {str(e)}")
         return {
             "success": False,
             "error": str(e),
-            "time": f"{time.time() - start_time:.2f}s",
-            "logs": logs
+            "trace": traceback.format_exc(),
+            "logs": debug_logs,
+            "processing_time": f"{time.time() - start_time:.2f}s"
         }
+
+@app.get("/direct-bnsi-test")
+async def direct_bnsi_test(movie_id: str = "224656"):
+    """اختبار مباشر لرابط bnsi"""
+    start_time = time.time()
+    logs = []
+    
+    # قائمة مجالات محتملة
+    domains = [
+        "harald-as.stloadi.live",
+        "larkin-as.stloadi.live", 
+        "mercury-as.stloadi.live",
+        "stloadi.live"
+    ]
+    
+    for domain in domains:
+        test_url = f"https://{domain}/bnsi/movies/{movie_id}"
+        logs.append(f"🔗 Testing: {test_url}")
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    proxy={"server": WORKING_PROXY} if WORKING_PROXY else None,
+                    args=["--no-sandbox"],
+                    timeout=10000
+                )
+                
+                page = await browser.new_page()
+                response = await page.goto(test_url, wait_until="networkidle", timeout=8000)
+                
+                if response and response.status == 200:
+                    try:
+                        json_data = await response.json()
+                        await browser.close()
+                        
+                        return {
+                            "success": True,
+                            "found": True,
+                            "domain": domain,
+                            "url": test_url,
+                            "data": json_data,
+                            "time": f"{time.time() - start_time:.2f}s"
+                        }
+                    except:
+                        try:
+                            text = await response.text()
+                            await browser.close()
+                            
+                            return {
+                                "success": True,
+                                "found": True,
+                                "domain": domain,
+                                "url": test_url,
+                                "data_type": "text",
+                                "content_preview": text[:500],
+                                "time": f"{time.time() - start_time:.2f}s"
+                            }
+                        except:
+                            pass
+                
+                await browser.close()
+                
+        except Exception as e:
+            logs.append(f"  ❌ Failed: {str(e)}")
+            continue
+    
+    return {
+        "success": False,
+        "message": "No direct bnsi access worked",
+        "logs": logs,
+        "time": f"{time.time() - start_time:.2f}s"
+    }
 
 # الصفحة الرئيسية
 @app.get("/", response_class=HTMLResponse)
@@ -386,77 +505,136 @@ def home():
     return """
     <html>
         <head>
-            <title>BNSI Movie Finder</title>
+            <title>Enhanced BNSI Movie Finder</title>
             <style>
-                body { font-family: sans-serif; padding: 50px; text-align: center; background: #f5f5f5; }
-                .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                input, textarea { width: 90%; padding: 12px; font-size: 16px; border: 2px solid #ddd; border-radius: 5px; margin: 10px 0; }
-                button { padding: 15px 30px; font-size: 16px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 5px; margin: 5px; }
-                button:hover { background: #0056b3; }
-                .info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; text-align: left; }
+                body { font-family: Arial, sans-serif; padding: 20px; background: #f0f2f5; }
+                .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 20px rgba(0,0,0,0.1); }
+                h1 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+                .method { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; border-left: 4px solid #007bff; }
+                .url-input { width: 95%; padding: 12px; font-size: 16px; border: 2px solid #ddd; border-radius: 5px; margin: 10px 0; font-family: monospace; }
+                button { padding: 12px 25px; margin: 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; }
+                .btn-primary { background: #007bff; color: white; }
+                .btn-success { background: #28a745; color: white; }
+                .btn-warning { background: #ffc107; color: black; }
+                #result { margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 5px; display: none; }
+                .log-entry { padding: 5px 10px; margin: 2px 0; background: white; border-left: 3px solid #6c757d; font-family: monospace; font-size: 12px; }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>🎬 BNSI Movie File Finder</h1>
-                <p>This tool specifically searches for <code>/bnsi/movies/</code> files</p>
+                <h1>🎬 Enhanced BNSI Movie Finder</h1>
+                <p>Advanced tool to find and extract <code>/bnsi/movies/</code> files</p>
                 
-                <div class="info">
-                    <strong>How it works:</strong>
-                    <ul>
-                        <li>Opens the page and immediately looks for <code>/bnsi/movies/</code> URLs</li>
-                        <li>Stops processing as soon as the file is found</li>
-                        <li>Ignores all other resources (images, CSS, fonts, etc.)</li>
-                        <li>Maximum 5-7 seconds per request</li>
-                    </ul>
+                <div class="method">
+                    <h3>🔍 Method 1: Deep Analysis</h3>
+                    <p>Analyzes page content, iframes, scripts, and network requests</p>
+                    <input type="text" class="url-input" id="deepUrl" 
+                           placeholder="Paste full URL here (e.g., https://mercuryglobal28-gif.github.io/m/ind.html?url=...)">
+                    <br>
+                    <button class="btn-primary" onclick="deepSearch()">Deep Analysis Search</button>
                 </div>
                 
-                <textarea id="movieUrl" rows="2" placeholder="Paste full URL here..."></textarea>
-                <br>
+                <div class="method">
+                    <h3>⚡ Method 2: Direct BNSI Test</h3>
+                    <p>Tests direct access to common bnsi domains</p>
+                    <input type="text" class="url-input" id="movieId" placeholder="Movie ID (e.g., 224656)" value="224656">
+                    <br>
+                    <button class="btn-success" onclick="directTest()">Test Direct Access</button>
+                </div>
                 
-                <input type="text" id="movieId" placeholder="Optional: Specific movie ID (numbers only)" />
-                <br><br>
+                <div class="method">
+                    <h3>🎯 Method 3: Token Extraction</h3>
+                    <p>Extracts movie token and tries to construct bnsi URL</p>
+                    <button class="btn-warning" onclick="testToken()">Test Token Extraction</button>
+                </div>
                 
-                <button onclick="searchBnsi()">🔍 Find BNSI Movie File</button>
-                <button onclick="quickTest()">⚡ Quick Test</button>
-                
-                <div id="result" style="margin-top: 30px; text-align: left;"></div>
+                <div id="result">
+                    <h3>Results:</h3>
+                    <div id="resultContent"></div>
+                    <h4>Logs:</h4>
+                    <div id="logsContainer"></div>
+                </div>
             </div>
-
+            
             <script>
-                function searchBnsi() {
-                    var url = document.getElementById("movieUrl").value;
-                    var movieId = document.getElementById("movieId").value;
-                    
-                    if (!url) { 
-                        alert("Please paste a URL!"); 
-                        return; 
+                function deepSearch() {
+                    const url = document.getElementById("deepUrl").value;
+                    if (!url) {
+                        alert("Please enter a URL");
+                        return;
                     }
                     
-                    var encodedUrl = encodeURIComponent(url);
-                    var apiUrl = "/find-bnsi-movie?url=" + encodedUrl;
+                    const encodedUrl = encodeURIComponent(url);
+                    showLoading("Deep analysis in progress...");
                     
-                    if (movieId) {
-                        apiUrl += "&movie_id=" + movieId;
-                    }
-                    
-                    document.getElementById("result").innerHTML = "<p>⏳ Searching for BNSI movie file...</p>";
-                    
-                    fetch(apiUrl)
-                        .then(response => response.json())
-                        .then(data => {
-                            var resultDiv = document.getElementById("result");
-                            resultDiv.innerHTML = "<h3>Results:</h3>";
-                            resultDiv.innerHTML += "<pre>" + JSON.stringify(data, null, 2) + "</pre>";
-                        })
-                        .catch(error => {
-                            document.getElementById("result").innerHTML = "<p>❌ Error: " + error + "</p>";
+                    fetch(`/deep-find-bnsi?url=${encodedUrl}`)
+                        .then(r => r.json())
+                        .then(displayResult)
+                        .catch(err => {
+                            document.getElementById("resultContent").innerHTML = `<p style="color: red">Error: ${err}</p>`;
+                            document.getElementById("result").style.display = 'block';
                         });
                 }
                 
-                function quickTest() {
-                    document.getElementById("movieUrl").value = "https://example.com/movie-page";
-                    document.getElementById("movieId").value = "224656";
+                function directTest() {
+                    const movieId = document.getElementById("movieId").value || "224656";
+                    showLoading(`Testing direct access for ID: ${movieId}`);
+                    
+                    fetch(`/direct-bnsi-test?movie_id=${movieId}`)
+                        .then(r => r.json())
+                        .then(displayResult)
+                        .catch(err => {
+                            document.getElementById("resultContent").innerHTML = `<p style="color: red">Error: ${err}</p>`;
+                            document.getElementById("result").style.display = 'block';
+                        });
+                }
+                
+                function testToken() {
+                    const sampleUrl = "https://mercuryglobal28-gif.github.io/m/ind.html?url=https://harald-as.stloadi.live/?token_movie=c1e0e2f4b897656d8566e5da785eb1&translation=93&token=e7b61f129f4a392ac4bf6726a9dd6a";
+                    document.getElementById("deepUrl").value = sampleUrl;
+                    deepSearch();
+                }
+                
+                function showLoading(message) {
+                    document.getElementById("result").style.display = 'block';
+                    document.getElementById("resultContent").innerHTML = `<p>⏳ ${message}</p>`;
+                    document.getElementById("logsContainer").innerHTML = '';
+                }
+                
+                function displayResult(data) {
+                    const resultDiv = document.getElementById("resultContent");
+                    const logsDiv = document.getElementById("logsContainer");
+                    
+                    // عرض النتيجة الرئيسية
+                    let html = `<div style="background: ${data.success ? '#d4edda' : '#f8d7da'}; padding: 15px; border-radius: 5px;">`;
+                    html += `<h4>${data.success ? '✅ SUCCESS' : '❌ FAILED'}</h4>`;
+                    html += `<p><strong>Message:</strong> ${data.message || 'No message'}</p>`;
+                    
+                    if (data.found) {
+                        html += `<p><strong>Type:</strong> ${data.type}</p>`;
+                        html += `<p><strong>URL:</strong> ${data.url || 'N/A'}</p>`;
+                        
+                        if (data.data) {
+                            html += `<p><strong>Data Preview:</strong></p>`;
+                            html += `<pre style="background: white; padding: 10px; overflow: auto; max-height: 300px;">${JSON.stringify(data.data, null, 2)}</pre>`;
+                        }
+                    }
+                    
+                    html += `<p><strong>Processing Time:</strong> ${data.processing_time || data.time || 'N/A'}</p>`;
+                    html += `</div>`;
+                    
+                    resultDiv.innerHTML = html;
+                    
+                    // عرض الـ logs
+                    if (data.logs && data.logs.length > 0) {
+                        let logsHtml = '';
+                        data.logs.forEach(log => {
+                            logsHtml += `<div class="log-entry">${log}</div>`;
+                        });
+                        logsDiv.innerHTML = logsHtml;
+                    }
+                    
+                    document.getElementById("result").style.display = 'block';
                 }
             </script>
         </body>
