@@ -1,179 +1,166 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 import uvicorn
 import os
-import traceback
 import base64
-from urllib.parse import unquote
 
 app = FastAPI()
 
-# البروكسي المعتمد
-WORKING_PROXY = "http://176.126.103.194:44214"
+# ==============================================================================
+# 🚀 قائمة البروكسيات (تأكد من تجديدها باستمرار)
+# ==============================================================================
+PROXY_LIST = [
+    "http://176.126.103.194:44214", 
+    "http://46.161.6.165:8080",
+    "http://194.87.238.6:80",
+    "http://37.193.52.2:8080",
+    "http://109.248.13.234:8080"
+]
 
-def scrape_movie_data(full_url: str, debug_logs: list):
-    logs = debug_logs
-    logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    
-    # 2. تسجيل الرابط الذي سيستخدمه المتصفح للتأكد أنه كامل
-    logs.append(f"🔗 Browser Navigating to: {full_url}")
-    
+class MovieRequest(BaseModel):
+    url: str
+
+def scrape_fast(target_url: str, proxy_url: str, logs: list):
+    logs.append(f"⚡ Trying Fast Proxy: {proxy_url}")
     movie_data = None
-    snapshot = ""
     
     with sync_playwright() as p:
         try:
+            # تشغيل المتصفح بأقل إعدادات ممكنة للسرعة
             browser = p.chromium.launch(
                 headless=True,
-                proxy={"server": WORKING_PROXY},
+                proxy={"server": proxy_url},
                 args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled"
+                    "--no-sandbox", 
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu",           # تعطيل الجرافيكس
+                    "--disable-dev-shm-usage", # توفير الذاكرة
+                    "--blink-settings=imagesEnabled=false" # منع الصور من الجذر
                 ]
             )
             
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="ru-RU", 
-                timezone_id="Europe/Moscow"
+                locale="ru-RU", timezone_id="Europe/Moscow"
             )
-            context.set_default_timeout(90000) 
+            
+            # تقليل مهلة الانتظار العامة
+            context.set_default_timeout(15000) 
             page = context.new_page()
 
+            # 🛑 المصيدة الذكية: تلتقط البيانات وتوقف التحميل فوراً
             def handle_response(response):
                 nonlocal movie_data
                 try:
-                    if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
-                        data = response.json()
-                        if "hlsSource" in data or "file" in data:
-                            movie_data = data
-                            logs.append("✅ JSON Data Captured!")
-                    
-                    if "m3u8" in response.url and "master" in response.url:
-                         if not movie_data:
-                             movie_data = {"direct_m3u8": response.url}
-                             logs.append("✅ Direct M3U8 Found")
+                    if response.status == 200:
+                        # التقاط JSON
+                        if ("bnsi/movies" in response.url or "cdn/movie" in response.url):
+                            data = response.json()
+                            if "hlsSource" in data or "file" in data:
+                                movie_data = data
+                        
+                        # التقاط m3u8 المباشر
+                        if "m3u8" in response.url and "master" in response.url:
+                             if not movie_data: movie_data = {"direct_m3u8": response.url}
                 except: pass
 
             page.on("response", handle_response)
-            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font"] else r.continue_())
+            
+            # ⛔ حظر الموارد الثقيلة (تسريع بنسبة 60%)
+            # نحظر الصور، الخطوط، ملفات التصميم CSS، وملفات الميديا
+            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font", "stylesheet", "media", "other"] else r.continue_())
 
             try:
-                logs.append("⏳ Loading Page...")
-                page.goto(full_url, wait_until="domcontentloaded")
+                # 🚀 التغيير الجوهري: waitUntil='commit'
+                # لا ننتظر تحميل الصفحة، ننتظر فقط الاتصال المبدئي
+                page.goto(target_url, wait_until="commit", timeout=10000)
                 
-                try:
-                    page.wait_for_selector("iframe", timeout=20000)
-                    page.mouse.click(500, 300) 
-                    page.wait_for_timeout(1000)
-                    page.mouse.click(500, 300)
-                except: pass
-
-                for _ in range(150):
-                    if movie_data: break
+                # ننتظر قليلاً ليقوم السكربت بطلب البيانات
+                for _ in range(50): # 5 ثواني كحد أقصى
+                    if movie_data: 
+                        logs.append("✅ Data Found Quickly!")
+                        break
+                    
+                    # محاولة نقر سريعة إذا لم تظهر البيانات
+                    if _ == 10: # بعد ثانية واحدة
+                        try: page.mouse.click(500, 300)
+                        except: pass
+                        
                     page.wait_for_timeout(100)
 
             except Exception as e:
-                logs.append(f"❌ Navigation Error: {str(e)}")
-
-            if not movie_data:
-                try:
-                    screenshot_bytes = page.screenshot(type='jpeg', quality=30)
-                    snapshot = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    logs.append("📸 Screenshot captured")
-                except: pass
+                logs.append(f"⚠️ Proxy slow/error: {str(e)}")
 
             browser.close()
-            
-            if movie_data:
-                return movie_data
-            else:
-                return {
-                    "success": False, 
-                    "error": "No Data Found", 
-                    "logs": logs,
-                    "screenshot_base64": snapshot
-                }
+            return movie_data
 
         except Exception as e:
-            return {"success": False, "error": f"Browser Error: {str(e)}", "trace": traceback.format_exc()}
+            logs.append(f"❌ Browser Launch Error: {str(e)}")
+            return None
 
-# ==============================================================================
-# 👇 الواجهة الأمامية الجديدة: صفحة لفحص الروابط بسهولة 👇
-# ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
     <html>
-        <head>
-            <title>Movie API Tester</title>
-            <style>
-                body { font-family: sans-serif; padding: 50px; text-align: center; }
-                input { width: 80%; padding: 15px; font-size: 16px; border: 2px solid #ddd; border-radius: 5px; }
-                button { padding: 15px 30px; font-size: 16px; background: #28a745; color: white; border: none; cursor: pointer; border-radius: 5px; }
-                button:hover { background: #218838; }
-                .hint { color: #666; margin-top: 10px; font-size: 14px; }
-            </style>
-        </head>
-        <body>
-            <h1>🎬 Movie Link Tester</h1>
-            <p>Paste the FULL movie link below. This tool will encode it safely.</p>
-            
-            <input type="text" id="movieUrl" placeholder="Paste long URL here (https://mercuryglobal...&token=...)" />
-            <br><br>
-            <button onclick="sendRequest()">🚀 Get Data</button>
-            
-            <p class="hint">Checking the link via this page guarantees it won't be cut off.</p>
+    <head>
+        <title>Turbo Scraper</title>
+        <style>
+            body { font-family: sans-serif; padding: 40px; background: #eef; text-align: center; }
+            input { width: 80%; padding: 15px; border: 1px solid #999; border-radius: 5px; }
+            button { width: 80%; padding: 15px; margin-top: 10px; background: #ff4500; color: white; border: none; font-size: 18px; cursor: pointer; }
+            #logs { text-align: left; background: #111; color: #0f0; padding: 15px; margin-top: 20px; border-radius: 5px; white-space: pre-wrap; display: none; }
+        </style>
+    </head>
+    <body>
+        <h2>⚡ Turbo Link Processor</h2>
+        <input type="text" id="urlInput" placeholder="Paste Full URL here...">
+        <button onclick="startScraping()" id="btn">🚀 Get Data Fast</button>
+        <div id="logs"></div>
 
-            <script>
-                function sendRequest() {
-                    var input = document.getElementById("movieUrl").value;
-                    if (!input) { alert("Please paste a URL!"); return; }
-                    
-                    // هذا السطر هو السر: تشفير الرابط ليصبح آمناً للإرسال
-                    var encodedUrl = encodeURIComponent(input);
-                    
-                    // توجيه المتصفح للرابط المشفر
-                    window.location.href = "/get-movie?url=" + encodedUrl;
-                }
-            </script>
-        </body>
+        <script>
+            async function startScraping() {
+                const url = document.getElementById('urlInput').value;
+                const btn = document.getElementById('btn');
+                const logBox = document.getElementById('logs');
+                
+                if(!url) return alert("URL Required");
+                
+                btn.disabled = true;
+                btn.innerText = "⚡ Processing...";
+                logBox.style.display = "block";
+                logBox.innerText = "Running Turbo Engine...\n";
+
+                try {
+                    const response = await fetch('/scrape', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: url })
+                    });
+                    const result = await response.json();
+                    logBox.innerText = JSON.stringify(result, null, 2);
+                } catch (e) { logBox.innerText = "Error: " + e; }
+                
+                btn.disabled = false;
+                btn.innerText = "🚀 Get Data Fast";
+            }
+        </script>
+    </body>
     </html>
     """
 
-@app.get("/get-movie")
-def get_movie_api(request: Request, response: Response):
-    debug_logs = []
-    try:
-        # قراءة الرابط الخام
-        raw_query_bytes = request.scope['query_string']
-        raw_query_string = raw_query_bytes.decode("utf-8")
+@app.post("/scrape")
+def scrape_endpoint(request: MovieRequest):
+    logs = []
+    
+    # تجربة البروكسيات
+    for proxy in PROXY_LIST:
+        data = scrape_fast(request.url, proxy, logs)
+        if data:
+            return {"success": True, "data": data, "speed": "Fast", "proxy": proxy}
         
-        debug_logs.append(f"🔍 Server Received Raw: {raw_query_string}")
-        
-        if "url=" in raw_query_string:
-            # استخراج الرابط
-            target_url = raw_query_string.split("url=", 1)[1]
-            # فك التشفير (مهم جداً الآن لأن الصفحة الجديدة سترسله مشفراً)
-            decoded_url = unquote(target_url)
-            
-            debug_logs.append(f"✂️ After Parsing & Decoding: {decoded_url}")
-            
-            return scrape_movie_data(decoded_url, debug_logs)
-        
-        response.status_code = 400
-        return {"error": "Missing url parameter", "logs": debug_logs}
-
-    except Exception as e:
-        response.status_code = 200
-        return {
-            "success": False,
-            "error": "Server Error",
-            "details": str(e),
-            "logs": debug_logs,
-            "trace": traceback.format_exc()
-        }
+    return {"success": False, "error": "All proxies too slow", "logs": logs}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
