@@ -4,32 +4,19 @@ import uvicorn
 import os
 import traceback
 import base64
-from urllib.parse import urlparse, parse_qs
 
 app = FastAPI()
 
-# البروكسي الحالي (تأكد أنه لا يزال يعمل)
+# البروكسي (تأكد أنه لا يزال حياً، إذا فشل جرب غيره)
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-def get_real_url(original_url: str):
-    try:
-        if "url=" in original_url:
-            parsed = urlparse(original_url)
-            query_params = parse_qs(parsed.query)
-            if "url" in query_params:
-                return query_params["url"][0]
-    except: pass
-    return original_url
-
-def scrape_movie_data(input_url: str):
-    target_url = get_real_url(input_url)
-    
+def scrape_movie_data(target_url: str):
     logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Target: {target_url}")
     
     movie_data = None
     snapshot = ""
+    html_dump = ""
     
     with sync_playwright() as p:
         try:
@@ -42,59 +29,84 @@ def scrape_movie_data(input_url: str):
                 ]
             )
             
-            # 👇👇 التعديل الجوهري: إضافة الهيدرز لخداع الموقع 👇👇
+            # إعداد سياق بمتصفح كامل
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 locale="ru-RU", 
-                timezone_id="Europe/Moscow",
-                extra_http_headers={
-                    "Referer": "https://mercuryglobal28-gif.github.io/", # نوهمهم أننا قادمون من الموقع الأصلي
-                    "Origin": "https://mercuryglobal28-gif.github.io/"
-                }
+                timezone_id="Europe/Moscow"
             )
-            
-            # زيادة الوقت إلى 90 ثانية للبروكسيات البطيئة
-            context.set_default_timeout(90000) 
+            context.set_default_timeout(60000) # 60 ثانية مهلة
             page = context.new_page()
 
+            # المصيدة
             def handle_response(response):
                 nonlocal movie_data
-                if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
+                # توسيع المصيدة لتشمل كل احتمالات ملفات الفيديو
+                if response.status == 200 and ("bnsi/movies" in response.url or "master.m3u8" in response.url or "index.m3u8" in response.url):
                     try:
-                        data = response.json()
-                        if "hlsSource" in data or "file" in data:
-                            movie_data = data
-                            logs.append("✅ Data Captured!")
+                        # إذا كان ملف JSON
+                        if "application/json" in response.headers.get("content-type", ""):
+                            data = response.json()
+                            if "hlsSource" in data:
+                                movie_data = data
+                                logs.append("✅ JSON Data Captured!")
+                        
+                        # إذا كان ملف M3U8 مباشر
+                        elif "m3u8" in response.url:
+                             movie_data = {"direct_m3u8": response.url}
+                             logs.append("✅ M3U8 Link Captured!")
                     except: pass
 
             page.on("response", handle_response)
             
-            # السماح بالسكربتات فقط (لأن المشغل يحتاجها)
-            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font", "stylesheet"] else r.continue_())
+            # حظر الصور لتسريع التحميل
+            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "font"] else r.continue_())
 
             try:
-                logs.append("⏳ Loading Page...")
+                logs.append("⏳ Loading Main Page...")
+                # نفتح الرابط الأصلي الكامل (وليس المختصر)
                 page.goto(target_url, wait_until="domcontentloaded")
-                logs.append(f"📄 Page Title Loaded: {page.title()}")
                 
-                # محاولة التشغيل
-                try: 
-                    page.wait_for_selector("body", state="visible", timeout=10000)
-                    page.mouse.click(500, 300)
-                except: pass
+                # 👇 الحل لمشكلة الشاشة البيضاء 👇
+                logs.append("👀 Waiting for Player Iframe...")
                 
+                # ننتظر ظهور الـ iframe
+                try:
+                    iframe_element = page.wait_for_selector("iframe", timeout=30000)
+                    if iframe_element:
+                        logs.append("✅ Iframe Found! Entering...")
+                        frame = iframe_element.content_frame()
+                        
+                        if frame:
+                            # ننتظر قليلاً ثم نضغط داخل الإطار
+                            page.wait_for_timeout(2000)
+                            try:
+                                # محاولة ضغط زر التشغيل داخل الإطار
+                                frame.click("body", position={"x": 500, "y": 300}, force=True)
+                                logs.append("🖱️ Clicked inside Iframe")
+                            except:
+                                logs.append("⚠️ Could not click inside frame (might be auto-play)")
+                    else:
+                        logs.append("⚠️ No Iframe found on page")
+                        
+                except Exception as e:
+                    logs.append(f"⚠️ Iframe wait error: {str(e)}")
+
                 # انتظار البيانات
-                for _ in range(200):
+                logs.append("⏳ Waiting for API response...")
+                for _ in range(150):
                     if movie_data: break
                     page.wait_for_timeout(100)
 
             except Exception as e:
                 logs.append(f"❌ Navigation Error: {str(e)}")
-                # 📸 التقاط صورة عند الخطأ
+
+            # إذا فشل، نحفظ HTML لنفهم السبب
+            if not movie_data:
                 try:
+                    html_dump = page.content()[:1000] # أول 1000 حرف
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
                     snapshot = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    logs.append("📸 Screenshot taken (check screenshot_base64)")
                 except: pass
 
             browser.close()
@@ -102,11 +114,11 @@ def scrape_movie_data(input_url: str):
             if movie_data:
                 return movie_data
             else:
-                # 📸 التقاط صورة في حال انتهاء الوقت دون بيانات
                 return {
                     "success": False, 
-                    "error": "Timeout - No Data", 
-                    "logs": logs,
+                    "error": "Timeout", 
+                    "logs": logs, 
+                    "html_preview": html_dump, # سيخبرنا هل الصفحة محظورة
                     "screenshot_base64": snapshot
                 }
 
