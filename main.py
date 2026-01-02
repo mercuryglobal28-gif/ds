@@ -5,17 +5,16 @@ import os
 import traceback
 import base64
 from urllib.parse import unquote
-import json
 
 app = FastAPI()
 
-# البروكسي (تأكد من أنه لا يزال يعمل)
+# البروكسي المعتمد
 WORKING_PROXY = "http://176.126.103.194:44214"
 
 def scrape_movie_data(full_url: str):
     logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Processing: {full_url}")
+    logs.append(f"🔗 Targeted URL: {full_url}") # تأكد من السجل هنا
     
     movie_data = None
     snapshot = ""
@@ -42,12 +41,14 @@ def scrape_movie_data(full_url: str):
             def handle_response(response):
                 nonlocal movie_data
                 try:
+                    # JSON check
                     if ("bnsi/movies" in response.url or "cdn/movie" in response.url) and response.status == 200:
                         data = response.json()
                         if "hlsSource" in data or "file" in data:
                             movie_data = data
                             logs.append("✅ JSON Data Captured!")
                     
+                    # M3U8 Direct check
                     if "m3u8" in response.url and "master" in response.url:
                          if not movie_data:
                              movie_data = {"direct_m3u8": response.url}
@@ -59,16 +60,16 @@ def scrape_movie_data(full_url: str):
 
             try:
                 logs.append("⏳ Loading Page...")
+                # نفتح الرابط الكامل
                 page.goto(full_url, wait_until="domcontentloaded")
                 
                 try:
-                    page.wait_for_selector("iframe", timeout=15000)
+                    page.wait_for_selector("iframe", timeout=20000)
                     page.mouse.click(500, 300) 
                     page.wait_for_timeout(1000)
                     page.mouse.click(500, 300)
                 except: pass
 
-                # انتظار البيانات
                 for _ in range(150):
                     if movie_data: break
                     page.wait_for_timeout(100)
@@ -103,35 +104,39 @@ def home():
     return {"status": "Active", "proxy": WORKING_PROXY}
 
 # ==============================================================================
-# 👇 التعديل هنا: إزالة async واستخدام try/except شامل 👇
+# 👇 الحل الجذري (Low-Level Reading) 👇
 # ==============================================================================
 @app.get("/get-movie")
 def get_movie_api(request: Request, response: Response):
     try:
-        # قراءة الرابط الخام
-        raw_query = str(request.url.query)
+        # نقرأ البايتات الخام مباشرة من بروتوكول الشبكة (ASGI Scope)
+        # هذا يتجاوز أي تحليل أو تقسيم يقوم به السيرفر
+        raw_query_bytes = request.scope['query_string']
         
-        if "url=" in raw_query:
-            target_url = raw_query.split("url=", 1)[1]
+        # نحول البايتات إلى نص
+        raw_query_string = raw_query_bytes.decode("utf-8")
+        
+        # الآن لدينا الرابط كما خرج من جهازك تماماً
+        if "url=" in raw_query_string:
+            # نقسم يدوياً
+            target_url = raw_query_string.split("url=", 1)[1]
+            
+            # فك التشفير إذا لزم الأمر
             decoded_url = unquote(target_url)
             
-            # استدعاء دالة الكشط
-            result = scrape_movie_data(decoded_url)
+            # تنظيف الرابط من أي مخلفات قد يضيفها المتصفح في النهاية
+            decoded_url = decoded_url.strip()
             
-            # التأكد من أن النتيجة يمكن تحويلها لـ JSON
-            # أحياناً يكون هناك بيانات غير صالحة تسبب الـ 500
-            return result
+            return scrape_movie_data(decoded_url)
         
         response.status_code = 400
-        return {"error": "Missing url parameter"}
+        return {"error": "Missing url parameter", "received_raw": raw_query_string}
 
     except Exception as e:
-        # الآن بدلاً من 500 Internal Server Error
-        # سيظهر لك سبب الخطأ الحقيقي
-        response.status_code = 200 # نجعله 200 لكي تقرأ الخطأ في المتصفح
+        response.status_code = 200
         return {
             "success": False,
-            "error": "Server Crash",
+            "error": "Server Error",
             "details": str(e),
             "trace": traceback.format_exc()
         }
