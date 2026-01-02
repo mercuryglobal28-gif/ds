@@ -8,13 +8,13 @@ from urllib.parse import unquote
 
 app = FastAPI()
 
-# البروكسي المعتمد
+# البروكسي (تأكد من أنه لا يزال يعمل، إذا توقف استبدله بجديد)
 WORKING_PROXY = "http://176.126.103.194:44214"
 
 def scrape_movie_data(full_url: str):
     logs = []
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
-    logs.append(f"🔗 Received URL: {full_url}") # لنرى الرابط الذي وصل فعلاً
+    logs.append(f"🔗 Processing URL: {full_url}") # سيظهر هنا الرابط كاملاً الآن
     
     movie_data = None
     snapshot = ""
@@ -66,9 +66,11 @@ def scrape_movie_data(full_url: str):
                 
                 # التعامل مع المشغل
                 try:
-                    page.wait_for_selector("iframe", timeout=25000)
-                    page.mouse.click(500, 300)
-                    page.wait_for_timeout(2000)
+                    # محاولة العثور على زر التشغيل وضغطه
+                    # نستخدم Timeout قصير هنا حتى لا نضيع وقتاً طويلاً
+                    page.wait_for_selector("iframe", timeout=15000)
+                    page.mouse.click(500, 300) 
+                    page.wait_for_timeout(1000)
                     page.mouse.click(500, 300)
                 except: pass
 
@@ -106,21 +108,27 @@ def scrape_movie_data(full_url: str):
 def home():
     return {"status": "Active", "proxy": WORKING_PROXY}
 
-# 👇👇 التغيير الجوهري هنا 👇👇
-# نستخدم Request بدلاً من Query لقراءة الرابط الخام
+# ==============================================================================
+# 👇 الحل السحري هنا 👇
+# ==============================================================================
 @app.get("/get-movie")
-def get_movie_api(request: Request):
-    # الحصول على الرابط الخام بالكامل كما وصل من المتصفح
-    raw_query = request.url.query
+async def get_movie_api(request: Request):
+    # نأخذ النص الخام للرابط بالكامل (query string)
+    raw_query = str(request.url.query)
     
-    # استخراج ما بعد "url=" يدوياً للحفاظ على الرموز &
+    # نبحث عن كلمة "url=" ونأخذ كل شيء يأتي بعدها
+    # هذا يضمن أخذ الرابط بما فيه من رموز & و =
     if "url=" in raw_query:
+        # نقسم النص عند أول ظهور لـ "url=" ونأخذ الجزء الثاني
         target_url = raw_query.split("url=", 1)[1]
-        # فك التشفير في حال كان الرابط مشفراً (Encoded)
-        target_url = unquote(target_url)
-        return scrape_movie_data(target_url)
+        
+        # إذا كان الرابط مشفراً (يبدأ بـ http%3A%2F%2F) نقوم بفك تشفيره
+        # أما إذا كان عادياً فسيظل كما هو
+        decoded_url = unquote(target_url)
+        
+        return scrape_movie_data(decoded_url)
     
-    return {"error": "Missing url parameter"}
+    return {"error": "Missing url parameter. Usage: /get-movie?url=YOUR_LINK"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
