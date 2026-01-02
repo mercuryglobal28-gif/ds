@@ -1,39 +1,25 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from playwright.sync_api import sync_playwright
 import uvicorn
 import os
 import traceback
-import time
 
 app = FastAPI()
 
-# ==============================================================================
-# 🇷🇺 قائمة البروكسيات (Rotator)
-# ضع هنا كل البروكسيات التي تجدها. الكود سيجربها واحداً تلو الآخر.
-# ==============================================================================
-PROXY_LIST = [
-    "http://194.87.238.6:80",
-    "http://46.29.172.58:8080",
-    "http://37.193.52.2:8080",
-    "http://85.192.62.228:8080",
-    "http://109.248.13.234:8080",
-    "http://213.135.155.150:3128",
-    "http://91.193.179.230:8080",
-    "http://176.124.45.162:3128",
-    "http://95.154.218.46:8080"
-]
-# ==============================================================================
-
-def scrape_with_proxy(target_url, proxy_address, logs):
-    logs.append(f"🔄 Trying Proxy: {proxy_address} ...")
-    movie_data = None
+def scrape_network_logs(target_url: str):
+    # قوائم لتخزين البيانات المستخرجة
+    js_files = []      # لتخزين ملفات الجافاسكربت
+    all_requests = []  # لتخزين كل الطلبات الأخرى
+    page_title = "Unknown"
+    status_code = 0
     
-    with sync_playwright() as p:
-        try:
-            # تشغيل المتصفح
+    try:
+        with sync_playwright() as p:
+            print("1. Launching Browser (Direct Connection)...")
+            
+            # تشغيل المتصفح بدون بروكسي
             browser = p.chromium.launch(
                 headless=True,
-                proxy={"server": proxy_address},
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
@@ -41,88 +27,69 @@ def scrape_with_proxy(target_url, proxy_address, logs):
                     "--disable-blink-features=AutomationControlled"
                 ]
             )
-        except Exception as e:
-            logs.append(f"❌ Failed to launch browser with {proxy_address}: {e}")
-            return None, "Browser Launch Failed"
-
-        try:
+            
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="ru-RU", timezone_id="Europe/Moscow"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
-            # تقليل وقت الانتظار حتى لا نضيع وقتاً طويلاً على بروكسي ميت
-            context.set_default_timeout(60000) # 20 ثانية لكل بروكسي
-            
             page = context.new_page()
-            
-            # اعتراض البيانات
-            def handle_response(response):
-                nonlocal movie_data
-                if "bnsi/movies" in response.url and response.status == 200:
-                    try:
-                        data = response.json()
-                        movie_data = data
-                    except: pass
-            
-            page.on("response", handle_response)
-            
-            # حظر الصور لتسريع التجربة
-            page.route("**/*", lambda r: r.abort() if r.request.resource_type in ["image", "media", "font"] else r.continue_())
 
-            logs.append(f"   --> Navigating to URL...")
-            page.goto(target_url, wait_until="domcontentloaded")
-            
-            # التحقق من نجاح التحميل المبدئي
-            title = page.title()
-            logs.append(f"   --> Page Title: {title}")
-            
-            if "Access Denied" in title or not title:
-                raise Exception("Blocked or Empty Title")
-
-            # محاولة النقر
-            try: page.mouse.click(500, 300)
-            except: pass
-            
-            # انتظار سريع للبيانات
-            for _ in range(50): # 5 ثواني
-                if movie_data: break
-                page.wait_for_timeout(100)
+            # 🕵️‍♂️ المصيدة: تسجيل كل طلب يخرج من المتصفح
+            def handle_request(request):
+                url = request.url
+                resource_type = request.resource_type
                 
-            browser.close()
-            
-            if movie_data:
-                return movie_data, "Success"
-            else:
-                return None, "No Data Found"
+                # تخزين الكل في القائمة العامة
+                all_requests.append(f"[{resource_type}] {url}")
+                
+                # فرز ملفات JS
+                if resource_type == "script" or ".js" in url:
+                    js_files.append(url)
+                    print(f"🔹 JS File Found: {url}")
 
-        except Exception as e:
-            logs.append(f"❌ Error with {proxy_address}: {str(e)}")
-            browser.close()
-            return None, str(e)
-
-def scrape_manager(target_url):
-    all_logs = []
-    
-    # 🔄 حلقة تكرارية لتجربة القائمة
-    for proxy in PROXY_LIST:
-        data, status = scrape_with_proxy(target_url, proxy, all_logs)
-        if data:
-            all_logs.append(f"✅ SUCCESS with proxy {proxy}!")
-            return {"success": True, "data": data, "logs": all_logs}
-        else:
-            all_logs.append(f"⚠️ Failed with {proxy}, trying next...")
+            # تفعيل المصيدة
+            page.on("request", handle_request)
             
-    return {"success": False, "diagnosis": "All Proxies Failed", "logs": all_logs}
+            print(f"2. Navigating to: {target_url}")
+            try:
+                # محاولة فتح الصفحة
+                response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                
+                # جلب العنوان وحالة الطلب
+                page_title = page.title()
+                status_code = response.status if response else 0
+                
+                # انتظار قليل لتحميل السكربتات الإضافية
+                page.wait_for_timeout(3000) 
+                
+            except Exception as e:
+                print(f"⚠️ Navigation warning: {e}")
+            
+            browser.close()
+
+            return {
+                "success": True,
+                "page_title": page_title,
+                "status_code": status_code, # 403 يعني محظور، 200 يعني شغال
+                "js_files_count": len(js_files),
+                "js_files": js_files, # القائمة المطلوبة
+                "other_requests_sample": all_requests[:10] # أول 10 طلبات عامة كعينة
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
 
 @app.get("/")
 def home():
-    return {"status": "Active", "proxies_loaded": len(PROXY_LIST)}
+    return {"status": "Network Sniffer Active", "usage": "/analyze?url=..."}
 
-@app.get("/get-movie")
-def get_movie_api(url: str = Query(..., description="Movie URL")):
-    return scrape_manager(url)
+@app.get("/analyze")
+def analyze_page(url: str = Query(..., description="Target URL")):
+    return scrape_network_logs(url)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
