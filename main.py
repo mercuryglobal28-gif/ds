@@ -1,39 +1,30 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from playwright.async_api import async_playwright
 import uvicorn
 import os
 import traceback
 import base64
 import asyncio
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 import time
+import re
 
 app = FastAPI()
 
 # البروكسي المعتمد
 WORKING_PROXY = "http://176.126.103.194:44214"
 
-# كاش للنتائج (اختياري - إذا كانت الروابط تتكرر)
-results_cache = {}
-CACHE_TIMEOUT = 300  # 5 دقائق
+# Regex للكشف عن عناوين الأرقام فقط
+NUMERIC_URL_PATTERN = re.compile(r'^https?://[^/]+/(\d+)(?:\.\w+)?$')
 
 async def scrape_movie_data(full_url: str, debug_logs: list):
     logs = debug_logs
     logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
+    logs.append(f"🔗 Target URL: {full_url}")
     
-    # التحقق من الكاش أولاً
-    cache_key = full_url
-    if cache_key in results_cache:
-        cached_time, cached_result = results_cache[cache_key]
-        if time.time() - cached_time < CACHE_TIMEOUT:
-            logs.append("⚡ Returning cached result")
-            return cached_result
-    
-    logs.append(f"🔗 Browser Navigating to: {full_url}")
-    
-    movie_data = None
-    snapshot = ""
+    target_content = None
+    target_url_found = None
     
     try:
         async with async_playwright() as p:
@@ -46,19 +37,10 @@ async def scrape_movie_data(full_url: str, debug_logs: list):
                     "--disable-extensions",
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
-                    "--disable-setuid-sandbox",
-                    "--disable-accelerated-2d-canvas",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-background-networking",
-                    "--disable-logging",
-                    "--disable-default-apps",
                     "--mute-audio",
-                    "--no-first-run",
-                    "--no-zygote"
+                    "--no-first-run"
                 ],
-                timeout=60000  # 60 ثانية لفتح المتصفح
+                timeout=30000
             )
             
             context = await browser.new_context(
@@ -70,196 +52,162 @@ async def scrape_movie_data(full_url: str, debug_logs: list):
                 ignore_https_errors=True
             )
             
-            # تعطيل الخدمات غير الضرورية لتسريع التحميل
-            await context.route("**/*", lambda route: asyncio.create_task(handle_route(route)))
-            
             page = await context.new_page()
-            page.set_default_timeout(15000)  # 15 ثانية كحد أقصى للانتظار
-
-            # متغير لالتقاط البيانات
-            captured_data = []
+            page.set_default_timeout(10000)  # 10 ثواني فقط
             
-            def handle_response(response):
+            # ==============================================================
+            # 👇 دالة التعامل مع الردود - البحث عن الملف الرقمي فقط 👇
+            # ==============================================================
+            found_target = False
+            
+            async def handle_response(response):
+                nonlocal target_content, target_url_found, found_target
+                
+                if found_target:
+                    return  # توقف إذا وجدنا المطلوب
+                
                 try:
                     url = response.url
-                    # تحقق من أنواع URLs التي تحتوي على بيانات الفيديو
-                    if ("bnsi/movies" in url or "cdn/movie" in url or "m3u8" in url or "master.m3u8" in url):
-                        if response.status == 200:
-                            # حاول الحصول على JSON أولاً
-                            try:
-                                data = response.json()
-                                captured_data.append({
-                                    "url": url,
-                                    "type": "json",
-                                    "data": data
-                                })
-                            except:
-                                # إذا لم يكن JSON، احصل على النص
-                                try:
-                                    text = response.text()
-                                    if "m3u8" in text or ".ts" in text:
-                                        captured_data.append({
-                                            "url": url,
-                                            "type": "m3u8",
-                                            "data": text
-                                        })
-                                except:
-                                    pass
-                except:
-                    pass
-            
-            page.on("response", lambda response: handle_response(response))
-            
-            try:
-                # استخدم wait_until="commit" بدلاً من "domcontentloaded" لتسريع التحميل
-                logs.append("⏳ Loading Page (fast mode)...")
-                response = await page.goto(full_url, wait_until="commit", timeout=15000)
-                
-                if response and response.status != 200:
-                    logs.append(f"⚠️ HTTP Status: {response.status}")
-                
-                # محاولة سريعة للعثور على iframe أو فيديو
-                try:
-                    # تحقق من وجود iframes بسرعة
-                    iframes = await page.query_selector_all("iframe")
-                    if iframes:
-                        logs.append(f"🎯 Found {len(iframes)} iframe(s)")
-                        # انقر على أول iframe
-                        first_iframe = iframes[0]
-                        await first_iframe.click(timeout=5000)
-                        await asyncio.sleep(1)  # انتظر 1 ثانية فقط
                     
-                    # تحقق من وجود عناصر فيديو
-                    video_elements = await page.query_selector_all("video")
-                    if video_elements:
-                        logs.append(f"🎬 Found {len(video_elements)} video element(s)")
-                        # حاول تشغيل الفيديو الأول
-                        await page.evaluate("""
-                            () => {
-                                const videos = document.querySelectorAll('video');
-                                if (videos.length > 0) {
-                                    videos[0].play().catch(e => console.log('Auto-play prevented'));
-                                }
-                            }
-                        """)
-                except Exception as e:
-                    logs.append(f"ℹ️ No interactive elements found or click failed: {str(e)}")
-                
-                # انتظار قصير لالتقاط الردود
-                await asyncio.sleep(3)
-                
-                # حاول الحصول على مصادر الفيديو من الصفحة مباشرة
-                try:
-                    video_sources = await page.evaluate("""
-                        () => {
-                            const sources = [];
-                            // ابحث عن جميع عناصر video
-                            document.querySelectorAll('video').forEach(video => {
-                                if (video.src) sources.push(video.src);
-                                // ابحث عن مصادر داخل source tags
-                                video.querySelectorAll('source').forEach(source => {
-                                    if (source.src) sources.push(source.src);
-                                });
-                            });
-                            // ابحث عن iframes
-                            document.querySelectorAll('iframe').forEach(iframe => {
-                                if (iframe.src) sources.push(iframe.src);
-                            });
-                            // ابحث عن عناصر a تحتوي على m3u8
-                            document.querySelectorAll('a[href*="m3u8"], a[href*="mp4"]').forEach(a => {
-                                sources.push(a.href);
-                            });
-                            return sources;
-                        }
-                    """)
+                    # التحقق إذا كان الرابط يحتوي على أرقام فقط
+                    if NUMERIC_URL_PATTERN.match(url):
+                        logs.append(f"🎯 FOUND NUMERIC URL: {url}")
+                        
+                        # حاول الحصول على محتواه
+                        try:
+                            if response.status == 200:
+                                content_type = response.headers.get('content-type', '').lower()
+                                
+                                if 'application/json' in content_type:
+                                    target_content = await response.json()
+                                    logs.append("✅ Got JSON content from numeric URL")
+                                elif 'text/' in content_type or 'application/' in content_type:
+                                    target_content = await response.text()
+                                    logs.append(f"✅ Got text content ({len(target_content)} chars)")
+                                else:
+                                    # للملفات الأخرى، احصل على معلومات عنها فقط
+                                    target_content = {
+                                        "url": url,
+                                        "content_type": content_type,
+                                        "status": response.status,
+                                        "headers": dict(response.headers)
+                                    }
+                                    logs.append(f"✅ Got file info (type: {content_type})")
+                                
+                                target_url_found = url
+                                found_target = True
+                                
+                                # توقف عن معالجة المزيد من الردود
+                                page.remove_listener("response", handle_response)
+                                
+                        except Exception as e:
+                            logs.append(f"⚠️ Couldn't read content from {url}: {str(e)}")
                     
-                    if video_sources:
-                        logs.append(f"🔍 Found {len(video_sources)} potential video sources in page")
-                        for src in video_sources[:5]:  # أول 5 مصادر فقط
-                            captured_data.append({
-                                "url": src,
-                                "type": "direct",
-                                "data": src
-                            })
                 except Exception as e:
-                    logs.append(f"ℹ️ Could not extract video sources from page: {str(e)}")
-                
-            except Exception as e:
-                logs.append(f"❌ Navigation Error: {str(e)}")
+                    pass  # تجاهل الأخطاء في معالجة الردود
             
-            # تحليل البيانات الملتقطة
-            if captured_data:
-                logs.append(f"✅ Captured {len(captured_data)} responses")
-                # أولوية للبيانات JSON
-                json_responses = [d for d in captured_data if d["type"] == "json"]
-                if json_responses:
-                    movie_data = json_responses[0]["data"]
+            # إضافة المعالج للردود
+            page.on("response", lambda response: asyncio.create_task(handle_response(response)))
+            
+            # ==============================================================
+            # 👇 حظر كل الملفات الغير ضرورية 👇
+            # ==============================================================
+            async def route_handler(route):
+                url = route.request.url
+                
+                # السماح فقط بـ:
+                # 1. الصفحة الرئيسية
+                # 2. ملفات HTML
+                # 3. ملفات JavaScript
+                # 4. طلبات API/XHR/Fetch
+                resource_type = route.request.resource_type
+                
+                # حظر الصور، CSS، الخطوط، الوسائط، وغيرها
+                blocked_types = ["image", "stylesheet", "font", "media", "manifest", "texttrack"]
+                
+                if resource_type in blocked_types:
+                    await route.abort()
+                elif NUMERIC_URL_PATTERN.match(url):
+                    # الملفات الرقمية - تابع لالتقاطها
+                    await route.continue_()
+                elif "m3u8" in url or "mp4" in url or "video" in url:
+                    # ملفات الفيديو - تابع (قد تحتوي على معلومات)
+                    await route.continue_()
                 else:
-                    # ثم مصادر m3u8
-                    m3u8_responses = [d for d in captured_data if d["type"] == "m3u8"]
-                    if m3u8_responses:
-                        movie_data = {"m3u8_content": m3u8_responses[0]["data"][:500]}
+                    # السماح للمحتوى الأساسي فقط
+                    if resource_type in ["document", "script", "xhr", "fetch"]:
+                        await route.continue_()
                     else:
-                        # ثم المصادر المباشرة
-                        direct_responses = [d for d in captured_data if d["type"] == "direct"]
-                        if direct_responses:
-                            movie_data = {"direct_sources": direct_responses[:10]}
+                        await route.abort()
             
-            # إذا لم نجد بيانات، خذ لقطة شاشة
-            if not movie_data:
-                try:
-                    screenshot_bytes = await page.screenshot(type='jpeg', quality=20)  # جودة أقل لتسريع
-                    snapshot = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    logs.append("📸 Screenshot captured (low quality)")
-                except Exception as e:
-                    logs.append(f"⚠️ Screenshot failed: {str(e)}")
+            await context.route("**/*", route_handler)
             
-            await browser.close()
-            
-            result = None
-            if movie_data:
-                result = {
-                    "success": True,
-                    "data": movie_data,
-                    "logs": logs,
-                    "response_count": len(captured_data)
+            # ==============================================================
+            # 👇 تحميل الصفحة 👇
+            # ==============================================================
+            try:
+                logs.append("⏳ Loading page...")
+                await page.goto(full_url, wait_until="networkidle", timeout=10000)
+                
+                # انتظر قصيراً لالتقاط الردود
+                logs.append("⏳ Waiting for responses...")
+                
+                # انتظر بحد أقصى 5 ثواني للعثور على الملف الرقمي
+                start_wait = time.time()
+                while not found_target and (time.time() - start_wait) < 5:
+                    await asyncio.sleep(0.1)
+                
+                if found_target:
+                    logs.append(f"✅ Found target file at: {target_url_found}")
+                    await browser.close()
+                    
+                    return {
+                        "success": True,
+                        "target_url": target_url_found,
+                        "content": target_content,
+                        "content_type": type(target_content).__name__,
+                        "logs": logs
+                    }
+                else:
+                    logs.append("🔍 No numeric URL files found in network traffic")
+                    
+                    # لقطة شاشة للتصحيح
+                    try:
+                        screenshot = await page.screenshot(type='jpeg', quality=20)
+                        screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
+                        logs.append("📸 Took screenshot for debugging")
+                    except:
+                        screenshot_b64 = ""
+                    
+                    await browser.close()
+                    
+                    return {
+                        "success": False,
+                        "error": "No numeric URL files detected in network",
+                        "logs": logs,
+                        "screenshot": screenshot_b64
+                    }
+                    
+            except Exception as e:
+                logs.append(f"❌ Page load error: {str(e)}")
+                await browser.close()
+                
+                return {
+                    "success": False,
+                    "error": f"Page load failed: {str(e)}",
+                    "logs": logs
                 }
-                # تخزين في الكاش
-                results_cache[cache_key] = (time.time(), result)
-            else:
-                result = {
-                    "success": False, 
-                    "error": "No video data found", 
-                    "logs": logs,
-                    "screenshot_base64": snapshot,
-                    "captured_responses": len(captured_data)
-                }
-            
-            return result
-
+                
     except Exception as e:
         return {
-            "success": False, 
-            "error": f"Browser Error: {str(e)}", 
+            "success": False,
+            "error": f"Browser Error: {str(e)}",
             "trace": traceback.format_exc(),
             "logs": logs
         }
 
-async def handle_route(route):
-    """معالجة الطلبات بحجب الأنواع غير الضرورية"""
-    resource_type = route.request.resource_type
-    
-    # الأنواع المسموحة فقط (الأسرع)
-    allowed_types = ["document", "script", "xhr", "fetch"]
-    
-    if resource_type in allowed_types:
-        await route.continue_()
-    else:
-        # حجب كل شيء آخر
-        await route.abort()
-
 # ==============================================================================
-# واجهة API محسنة
+# 👇 واجهة API محسنة مع خيارات متعددة 👇
 # ==============================================================================
 @app.get("/get-movie")
 async def get_movie_api(request: Request, response: Response):
@@ -271,7 +219,7 @@ async def get_movie_api(request: Request, response: Response):
         raw_query_bytes = request.scope['query_string']
         raw_query_string = raw_query_bytes.decode("utf-8")
         
-        debug_logs.append(f"🔍 Server Received Raw: {raw_query_string}")
+        debug_logs.append(f"🔍 Raw query: {raw_query_string[:100]}...")
         
         if "url=" in raw_query_string:
             # استخراج الرابط
@@ -279,7 +227,11 @@ async def get_movie_api(request: Request, response: Response):
             # فك التشفير
             decoded_url = unquote(target_url)
             
-            debug_logs.append(f"✂️ After Parsing & Decoding: {decoded_url}")
+            debug_logs.append(f"🎯 Target URL: {decoded_url[:200]}...")
+            
+            # تحقق إذا كان الرابط نفسه رقمي
+            if NUMERIC_URL_PATTERN.match(decoded_url):
+                debug_logs.append("⚠️ Direct numeric URL provided - will fetch directly")
             
             # تنفيذ عملية الـ scraping
             result = await scrape_movie_data(decoded_url, debug_logs)
@@ -292,7 +244,7 @@ async def get_movie_api(request: Request, response: Response):
             if isinstance(result, dict):
                 result["processing_time"] = f"{elapsed_time:.2f}s"
             
-            return result
+            return JSONResponse(content=result)
         
         response.status_code = 400
         return {"error": "Missing url parameter", "logs": debug_logs}
@@ -307,105 +259,236 @@ async def get_movie_api(request: Request, response: Response):
             "trace": traceback.format_exc()
         }
 
-# الصفحة الرئيسية (كما هي)
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <html>
-        <head>
-            <title>Movie API Tester</title>
-            <style>
-                body { font-family: sans-serif; padding: 50px; text-align: center; }
-                input { width: 80%; padding: 15px; font-size: 16px; border: 2px solid #ddd; border-radius: 5px; }
-                button { padding: 15px 30px; font-size: 16px; background: #28a745; color: white; border: none; cursor: pointer; border-radius: 5px; }
-                button:hover { background: #218838; }
-                .hint { color: #666; margin-top: 10px; font-size: 14px; }
-            </style>
-        </head>
-        <body>
-            <h1>🎬 Movie Link Tester</h1>
-            <p>Paste the FULL movie link below. This tool will encode it safely.</p>
-            
-            <input type="text" id="movieUrl" placeholder="Paste long URL here (https://mercuryglobal...&token=...)" />
-            <br><br>
-            <button onclick="sendRequest()">🚀 Get Data</button>
-            
-            <p class="hint">Checking the link via this page guarantees it won't be cut off.</p>
-
-            <script>
-                function sendRequest() {
-                    var input = document.getElementById("movieUrl").value;
-                    if (!input) { alert("Please paste a URL!"); return; }
-                    
-                    // تشفير الرابط ليصبح آمناً للإرسال
-                    var encodedUrl = encodeURIComponent(input);
-                    
-                    // توجيه المتصفح للرابط المشفر
-                    window.location.href = "/get-movie?url=" + encodedUrl;
-                }
-            </script>
-        </body>
-    </html>
-    """
-
-# API endpoint سريع للتحقق فقط
-@app.get("/quick-check")
-async def quick_check(url: str):
-    """واجهة أسرع مع إعدادات محدودة"""
+# ==============================================================================
+# 👇 واجهة للفحص المباشر للملفات الرقمية 👇
+# ==============================================================================
+@app.get("/direct-fetch")
+async def direct_fetch_numeric(url: str):
+    """جلب محتوى الملف الرقمي مباشرة"""
     start_time = time.time()
     logs = []
     
     try:
-        logs.append(f"🚀 Quick check for: {url[:100]}...")
+        logs.append(f"🎯 Direct fetch for: {url}")
+        
+        # تحقق إذا كان الرابط رقمي
+        if not NUMERIC_URL_PATTERN.match(url):
+            return {
+                "success": False,
+                "error": "URL is not numeric. Must be like: https://example.com/123456",
+                "logs": logs
+            }
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+                proxy={"server": WORKING_PROXY} if WORKING_PROXY else None,
+                args=["--no-sandbox"],
+                timeout=15000
             )
             
-            page = await browser.new_page()
-            page.set_default_timeout(10000)  # 10 ثواني فقط
+            context = await browser.new_context()
+            page = await context.new_page()
             
-            # التقاط الردود السريعة فقط
-            m3u8_urls = []
-            def quick_response_handler(response):
-                if "m3u8" in response.url:
-                    m3u8_urls.append(response.url)
+            # الذهاب مباشرة إلى الرابط الرقمي
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=10000)
             
-            page.on("response", lambda resp: quick_response_handler(resp))
-            
-            # انتقل للصفحة بدون انتظار كامل
-            await page.goto(url, wait_until="networkidle", timeout=10000)
-            
-            # انتظر 2 ثانية فقط لالتقاط الردود
-            await asyncio.sleep(2)
-            
-            await browser.close()
-            
-            elapsed = time.time() - start_time
-            
-            if m3u8_urls:
-                return {
-                    "success": True,
-                    "m3u8_urls": m3u8_urls[:5],  # أول 5 فقط
-                    "time": f"{elapsed:.2f}s",
-                    "logs": logs
-                }
+            if response:
+                content_type = response.headers.get('content-type', '')
+                
+                # محاولة قراءة المحتوى بناءً على نوعه
+                try:
+                    if 'application/json' in content_type:
+                        content = await response.json()
+                    else:
+                        content = await response.text()
+                    
+                    elapsed = time.time() - start_time
+                    
+                    return {
+                        "success": True,
+                        "url": url,
+                        "content_type": content_type,
+                        "content": content,
+                        "size": len(str(content)),
+                        "time": f"{elapsed:.2f}s",
+                        "logs": logs
+                    }
+                    
+                except Exception as e:
+                    elapsed = time.time() - start_time
+                    return {
+                        "success": False,
+                        "error": f"Could not read content: {str(e)}",
+                        "url": url,
+                        "content_type": content_type,
+                        "status": response.status,
+                        "time": f"{elapsed:.2f}s",
+                        "logs": logs
+                    }
             else:
+                await browser.close()
                 return {
                     "success": False,
-                    "message": "No m3u8 URLs found in quick scan",
-                    "time": f"{elapsed:.2f}s",
+                    "error": "No response received",
+                    "url": url,
                     "logs": logs
                 }
                 
     except Exception as e:
         return {
             "success": False,
-            "error": str(e),
-            "time": f"{time.time() - start_time:.2f}s"
+            "error": f"Direct fetch failed: {str(e)}",
+            "url": url,
+            "time": f"{time.time() - start_time:.2f}s",
+            "logs": logs
         }
+
+# ==============================================================================
+# 👇 صفحة واجهة المستخدم 👇
+# ==============================================================================
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+        <head>
+            <title>Numeric File Finder</title>
+            <style>
+                body { font-family: Arial, sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }
+                h1 { color: #333; }
+                .container { background: #f5f5f5; padding: 20px; border-radius: 10px; }
+                input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+                button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+                button:hover { background: #45a049; }
+                .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; }
+                .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; }
+                .tab button:hover { background-color: #ddd; }
+                .tab button.active { background-color: #ccc; }
+                .tabcontent { display: none; padding: 20px; border: 1px solid #ccc; border-top: none; }
+                .result { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; border: 1px solid #ddd; }
+                pre { background: #333; color: #fff; padding: 10px; border-radius: 5px; overflow-x: auto; }
+            </style>
+        </head>
+        <body>
+            <h1>🔢 Numeric File Finder</h1>
+            <p>This tool specifically looks for files with numeric URLs (e.g., https://domain.com/123456789)</p>
+            
+            <div class="tab">
+                <button class="tablinks active" onclick="openTab(event, 'scrape')">Scrape Site</button>
+                <button class="tablinks" onclick="openTab(event, 'direct')">Direct Fetch</button>
+            </div>
+            
+            <div id="scrape" class="tabcontent" style="display: block;">
+                <h3>Scrape Website for Numeric Files</h3>
+                <p>Enter a website URL. The tool will scan network traffic for numeric URLs.</p>
+                <input type="text" id="siteUrl" placeholder="https://example.com/movie-page" />
+                <button onclick="scrapeSite()">🔍 Scan for Numeric Files</button>
+                <div id="scrapeResult"></div>
+            </div>
+            
+            <div id="direct" class="tabcontent">
+                <h3>Direct Numeric File Fetch</h3>
+                <p>If you already have a numeric URL, fetch it directly:</p>
+                <input type="text" id="numericUrl" placeholder="https://example.com/123456789" />
+                <button onclick="fetchDirect()">⬇️ Fetch Numeric File</button>
+                <div id="directResult"></div>
+            </div>
+            
+            <script>
+                function openTab(evt, tabName) {
+                    var i, tabcontent, tablinks;
+                    tabcontent = document.getElementsByClassName("tabcontent");
+                    for (i = 0; i < tabcontent.length; i++) {
+                        tabcontent[i].style.display = "none";
+                    }
+                    tablinks = document.getElementsByClassName("tablinks");
+                    for (i = 0; i < tablinks.length; i++) {
+                        tablinks[i].className = tablinks[i].className.replace(" active", "");
+                    }
+                    document.getElementById(tabName).style.display = "block";
+                    evt.currentTarget.className += " active";
+                }
+                
+                async function scrapeSite() {
+                    const url = document.getElementById('siteUrl').value;
+                    if (!url) { alert('Please enter a URL'); return; }
+                    
+                    const resultDiv = document.getElementById('scrapeResult');
+                    resultDiv.innerHTML = '<div class="result">⏳ Scanning for numeric files...</div>';
+                    
+                    try {
+                        const encoded = encodeURIComponent(url);
+                        const response = await fetch(`/get-movie?url=${encoded}`);
+                        const data = await response.json();
+                        
+                        let html = '<div class="result">';
+                        if (data.success) {
+                            html += `<h4>✅ Found Numeric File!</h4>`;
+                            html += `<p><strong>URL:</strong> ${data.target_url}</p>`;
+                            html += `<p><strong>Type:</strong> ${data.content_type}</p>`;
+                            html += `<p><strong>Time:</strong> ${data.processing_time}</p>`;
+                            html += `<h5>Content Preview:</h5>`;
+                            html += `<pre>${JSON.stringify(data.content, null, 2).substring(0, 1000)}...</pre>`;
+                        } else {
+                            html += `<h4>❌ No Numeric Files Found</h4>`;
+                            html += `<p><strong>Error:</strong> ${data.error}</p>`;
+                        }
+                        
+                        html += `<h5>Logs:</h5><ul>`;
+                        data.logs.forEach(log => {
+                            html += `<li>${log}</li>`;
+                        });
+                        html += `</ul></div>`;
+                        
+                        resultDiv.innerHTML = html;
+                    } catch (error) {
+                        resultDiv.innerHTML = `<div class="result">❌ Error: ${error.message}</div>`;
+                    }
+                }
+                
+                async function fetchDirect() {
+                    const url = document.getElementById('numericUrl').value;
+                    if (!url) { alert('Please enter a numeric URL'); return; }
+                    
+                    const resultDiv = document.getElementById('directResult');
+                    resultDiv.innerHTML = '<div class="result">⏳ Fetching file...</div>';
+                    
+                    try {
+                        const response = await fetch(`/direct-fetch?url=${encodeURIComponent(url)}`);
+                        const data = await response.json();
+                        
+                        let html = '<div class="result">';
+                        if (data.success) {
+                            html += `<h4>✅ File Fetched Successfully!</h4>`;
+                            html += `<p><strong>URL:</strong> ${data.url}</p>`;
+                            html += `<p><strong>Type:</strong> ${data.content_type}</p>`;
+                            html += `<p><strong>Size:</strong> ${data.size} bytes</p>`;
+                            html += `<p><strong>Time:</strong> ${data.time}</p>`;
+                            html += `<h5>Content Preview:</h5>`;
+                            html += `<pre>${JSON.stringify(data.content, null, 2).substring(0, 1000)}...</pre>`;
+                        } else {
+                            html += `<h4>❌ Fetch Failed</h4>`;
+                            html += `<p><strong>Error:</strong> ${data.error}</p>`;
+                        }
+                        
+                        if (data.logs && data.logs.length > 0) {
+                            html += `<h5>Logs:</h5><ul>`;
+                            data.logs.forEach(log => {
+                                html += `<li>${log}</li>`;
+                            });
+                            html += `</ul>`;
+                        }
+                        
+                        html += `</div>`;
+                        resultDiv.innerHTML = html;
+                    } catch (error) {
+                        resultDiv.innerHTML = `<div class="result">❌ Error: ${error.message}</div>`;
+                    }
+                }
+            </script>
+        </body>
+    </html>
+    """
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
