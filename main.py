@@ -199,4 +199,5 @@ def get_movie_api(request: Request, response: Response):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port) يحتاج وقت اكثر من 20 ثانية او ما يعادل هل يمكن تسريع الكود
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
