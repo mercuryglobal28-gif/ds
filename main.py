@@ -9,16 +9,12 @@ from urllib.parse import unquote
 
 app = FastAPI()
 
-# ==============================================================================
-# 💎 البروكسي المدفوع الجديد (تم التحديث)
-# ==============================================================================
-# http://username:password@ip:port
+# البروكسي المعتمد
 WORKING_PROXY = "http://40jSHv:RcQr6u@147.45.56.91:8000"
-# ==============================================================================
 
 def scrape_movie_data(full_url: str, debug_logs: list):
     logs = debug_logs
-    logs.append(f"🚀 Start: Connecting via Private Proxy (147.45...)")
+    logs.append(f"🚀 Start: Connecting via {WORKING_PROXY}")
     
     # تسجيل الرابط الذي سيستخدمه المتصفح للتأكد أنه كامل
     logs.append(f"🔗 Browser Navigating to: {full_url}")
@@ -64,9 +60,14 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             page.on("response", handle_response)
 
             # ==================================================================
-            # 👇 التعديل: منع CSS، الصور، الخطوط، والوسائط لتسريع التحميل 👇
+            # 👇 التعديل الجديد: منع CSS، الصور، الخطوط، والوسائط 👇
             # ==================================================================
             def intercept_route(route):
+                # الأنواع المحظورة:
+                # stylesheet: ملفات التصميم CSS
+                # image: الصور والأيقونات
+                # font: الخطوط
+                # media: الفيديو والصوت
                 excluded_types = ["stylesheet", "image", "font", "media"]
                 
                 if route.request.resource_type in excluded_types:
@@ -97,7 +98,7 @@ def scrape_movie_data(full_url: str, debug_logs: list):
             except Exception as e:
                 logs.append(f"❌ Navigation Error: {str(e)}")
 
-            # التقاط صورة في حال الفشل
+            # التقاط صورة في حال الفشل (قد تظهر الصفحة بيضاء أو غير منسقة بسبب منع CSS وهذا طبيعي)
             if not movie_data:
                 try:
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
@@ -198,4 +199,4 @@ def get_movie_api(request: Request, response: Response):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port) يحتاج وقت اكثر من 20 ثانية او ما يعادل هل يمكن تسريع الكود
