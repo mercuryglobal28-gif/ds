@@ -10,9 +10,11 @@ from urllib.parse import unquote
 app = FastAPI()
 
 # ==============================================================================
-# 💎 إعدادات البروكسي المدفوع
+# 💎 إعدادات البروكسي (مفصولة لضمان الاتصال)
 # ==============================================================================
-WORKING_PROXY = "http://40jSHv:RcQr6u@147.45.56.91:8000"
+PROXY_HOST = "147.45.56.91:8000"  # الايبي والبورت فقط
+PROXY_USER = "40jSHv"             # اسم المستخدم
+PROXY_PASS = "RcQr6u"             # كلمة المرور
 # ==============================================================================
 
 def scrape_movie_data(full_url: str, debug_logs: list):
@@ -24,13 +26,18 @@ def scrape_movie_data(full_url: str, debug_logs: list):
     
     with sync_playwright() as p:
         try:
+            # تشغيل المتصفح مع إعدادات المصادقة المنفصلة
             browser = p.chromium.launch(
                 headless=True,
-                proxy={"server": WORKING_PROXY},
+                proxy={
+                    "server": f"http://{PROXY_HOST}",
+                    "username": PROXY_USER,
+                    "password": PROXY_PASS
+                },
                 args=[
                     "--no-sandbox",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage" # تقليل استهلاك الذاكرة
+                    "--disable-dev-shm-usage"
                 ]
             )
             
@@ -38,36 +45,33 @@ def scrape_movie_data(full_url: str, debug_logs: list):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 locale="ru-RU", 
                 timezone_id="Europe/Moscow",
-                ignore_https_errors=True # تجاهل أخطاء الشهادات لتسريع الاتصال
+                ignore_https_errors=True
             )
             
-            # مهلة 60 ثانية كافية جداً
             context.set_default_timeout(60000) 
             page = context.new_page()
 
-            # 1. خطوة فحص البروكسي (Sanity Check)
+            # 1. فحص البروكسي (اختياري لكن مفيد للتأكد)
             try:
-                logs.append("🕵️ Checking Proxy IP...")
-                # موقع خفيف جداً للتأكد من الاتصال
-                page.goto("http://checkip.amazonaws.com", timeout=10000)
-                ip = page.content().strip()
-                logs.append(f"✅ Proxy Works! IP: {ip[:20]}...")
+                page.goto("http://checkip.amazonaws.com", timeout=15000)
+                content = page.content()
+                # تنظيف النص لعرض الايبي فقط
+                ip_clean = page.inner_text("body").strip()
+                logs.append(f"✅ Proxy Auth Success! IP: {ip_clean}")
             except Exception as e:
-                logs.append(f"⚠️ Proxy Check Warning: {str(e)}")
+                logs.append(f"⚠️ Proxy Auth Warning: {str(e)}")
 
             # 2. إعداد المصيدة
             def handle_response(response):
                 nonlocal movie_data
                 try:
                     if response.status == 200:
-                        # التقاط ملفات البيانات
                         if ("bnsi/movies" in response.url or "cdn/movie" in response.url):
                             data = response.json()
                             if "hlsSource" in data or "file" in data:
                                 movie_data = data
                                 logs.append("✅ JSON Data Captured!")
                         
-                        # التقاط ملفات التشغيل المباشرة
                         if "m3u8" in response.url and "master" in response.url:
                              if not movie_data:
                                  movie_data = {"direct_m3u8": response.url}
@@ -76,42 +80,37 @@ def scrape_movie_data(full_url: str, debug_logs: list):
 
             page.on("response", handle_response)
 
-            # 3. تسريع الصفحة بحظر الموارد غير الضرورية
+            # 3. حظر الموارد الثقيلة
             def intercept_route(route):
-                # نحظر الصور والخطوط فقط، ونسمح بالباقي
-                if route.request.resource_type in ["image", "font", "stylesheet"]:
+                if route.request.resource_type in ["image", "font"]:
                     route.abort()
                 else:
                     route.continue_()
 
             page.route("**/*", intercept_route)
 
-            # 4. الذهاب للموقع (الاستراتيجية السريعة)
+            # 4. الذهاب للموقع
             try:
                 logs.append(f"⏳ Navigating to Movie URL...")
-                # wait_until="commit": لا ننتظر تحميل الصفحة، ننتظر فقط بدء الاتصال
-                page.goto(full_url, wait_until="commit", timeout=45000)
-                logs.append("✅ Connection established, waiting for scripts...")
+                page.goto(full_url, wait_until="domcontentloaded", timeout=45000)
+                
+                # محاولة التشغيل
+                try:
+                    page.wait_for_selector("iframe", timeout=10000)
+                    page.mouse.click(500, 300)
+                    page.wait_for_timeout(1000)
+                    page.mouse.click(500, 300)
+                except: pass
 
-                # ننتظر 15 ثانية فقط لتقوم السكربتات بطلب الفيديو في الخلفية
+                # انتظار البيانات
                 for _ in range(150):
-                    if movie_data: 
-                        logs.append("🎯 Data caught early!")
-                        break
-                    
-                    # محاولة نقر وهمية لتنشيط المشغل
-                    if _ % 20 == 0: # كل ثانيتين
-                        try:
-                            page.wait_for_selector("iframe", timeout=1000)
-                            page.mouse.click(500, 300)
-                        except: pass
-                        
+                    if movie_data: break
                     page.wait_for_timeout(100)
 
             except Exception as e:
-                logs.append(f"⚠️ Navigation Timeout (Expected): {str(e)}")
+                logs.append(f"❌ Navigation Error: {str(e)}")
 
-            # التقاط صورة فقط إذا فشلنا تماماً
+            # التقاط صورة عند الفشل فقط
             if not movie_data:
                 try:
                     screenshot_bytes = page.screenshot(type='jpeg', quality=30)
@@ -134,28 +133,19 @@ def scrape_movie_data(full_url: str, debug_logs: list):
         except Exception as e:
             return {"success": False, "error": f"Critical Error: {str(e)}", "trace": traceback.format_exc()}
 
-# ==============================================================================
-# الواجهة والكود المساعد
-# ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
     <html>
-        <head><title>Pro Scraper</title></head>
         <body style="font-family:sans-serif; text-align:center; padding:50px;">
-            <h1>🚀 Pro Proxy Scraper</h1>
-            <p>Paste the full URL below:</p>
-            <input type="text" id="url" style="width:80%; padding:10px;" placeholder="https://mercuryglobal...&token=...">
-            <br><br>
-            <button onclick="go()" style="padding:10px 20px; background:blue; color:white; cursor:pointer;">Get Data</button>
-            <div id="log" style="text-align:left; background:#eee; padding:20px; margin-top:20px; white-space:pre-wrap;"></div>
+            <h1>🚀 Proxy Fix Updated</h1>
+            <p>Paste URL below:</p>
+            <input type="text" id="url" style="width:80%; padding:10px;">
+            <button onclick="go()">Get Data</button>
             <script>
                 async function go() {
                     const u = document.getElementById('url').value;
-                    const l = document.getElementById('log');
-                    l.innerText = "Processing...";
-                    const encoded = encodeURIComponent(u);
-                    window.location.href = "/get-movie?url=" + encoded;
+                    window.location.href = "/get-movie?url=" + encodeURIComponent(u);
                 }
             </script>
         </body>
