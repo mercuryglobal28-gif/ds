@@ -16,7 +16,8 @@ FULL_TARGET_URL = BASE_URL + TARGET_URI
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": BASE_URL
+    "Referer": BASE_URL,
+    "Origin": BASE_URL
 }
 
 # ==============================================================================
@@ -28,16 +29,21 @@ def fetch_assets():
         response = requests.get(FULL_TARGET_URL, headers=HEADERS, timeout=15)
         html = response.text
         
-        # استخراج المتغيرات
-        movie_id = re.search(r"MOVIE_ID\s*=\s*['\"]?(\d+)['\"]?", html)
-        cuid = re.search(r"PLAYER_CUID\s*=\s*['\"]([^'\"]+)['\"]", html)
-        ident = re.search(r"IDENTIFIER\s*=\s*['\"]([^'\"]+)['\"]", html)
-        
+        # استخراج المتغيرات (مع قيم افتراضية للحماية)
         config = {
-            "MOVIE_ID": movie_id.group(1) if movie_id else "259509",
-            "PLAYER_CUID": cuid.group(1) if cuid else "unknown",
-            "IDENTIFIER": ident.group(1) if ident else "unknown"
+            "MOVIE_ID": "259509",
+            "PLAYER_CUID": "unknown",
+            "IDENTIFIER": "unknown"
         }
+        
+        m_id = re.search(r"MOVIE_ID\s*=\s*['\"]?(\d+)['\"]?", html)
+        if m_id: config["MOVIE_ID"] = m_id.group(1)
+            
+        cuid = re.search(r"PLAYER_CUID\s*=\s*['\"]([^'\"]+)['\"]", html)
+        if cuid: config["PLAYER_CUID"] = cuid.group(1)
+            
+        ident = re.search(r"IDENTIFIER\s*=\s*['\"]([^'\"]+)['\"]", html)
+        if ident: config["IDENTIFIER"] = ident.group(1)
         
         # استخراج رابط hs.js
         script_match = re.search(r'src="([^"]*hs\.js[^"]*)"', html)
@@ -56,79 +62,113 @@ def fetch_assets():
         return None, None
 
 # ==============================================================================
-# 2. تشغيل Node.js مباشرة (تجاوز مشاكل المكتبات)
+# 2. تشغيل Node.js مع بيئة وهمية متطورة (Robust Environment)
 # ==============================================================================
 def run_node_script(config, hs_code):
-    # بناء بيئة وهمية قوية جداً
-    # السر هنا في دالة $: إذا تم تمرير دالة لها، ننفذها فوراً!
     js_payload = f"""
-    // 1. بيئة وهمية (Mock Environment)
+    // ============================================================
+    // 1. نظام "الجوكر" (Universal Proxy)
+    // هذا يمنع السكربت من الانهيار إذا طلب أي عنصر غير موجود
+    // ============================================================
+    const safeObj = new Proxy({{}}, {{
+        get: function(target, prop) {{
+            if (prop === 'style') return {{}}; // دائماً يعيد ستايل فارغ
+            if (prop === 'value') return '0';
+            if (prop === 'innerHTML') return '';
+            if (prop === 'length') return 0;
+            // إذا تم استدعاؤه كدالة، أعد نفس الكائن
+            return () => safeObj; 
+        }}
+    }});
+
+    // ============================================================
+    // 2. محاكاة المتصفح (Browser Mock)
+    // ============================================================
     const window = {{
         location: {{ href: '{FULL_TARGET_URL}', hostname: 'kinovod120226.pro', origin: '{BASE_URL}', protocol: 'https:' }},
-        navigator: {{ userAgent: '{HEADERS['User-Agent']}' }},
+        navigator: {{ userAgent: '{HEADERS['User-Agent']}', webdriver: false, plugins: [] }},
         screen: {{ width: 1920, height: 1080 }},
-        document: {{ cookie: '' }}
+        document: {{ cookie: '' }},
+        top: {{ location: {{ href: '{FULL_TARGET_URL}' }} }},
+        self: {{}},
+        localStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
+        sessionStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }}
     }};
+    window.self = window; // Circular reference
+
     const document = {{
         location: window.location,
         cookie: '',
-        // كائن سحري يمنع الأخطاء عند البحث عن العناصر
-        getElementById: function(id) {{ return {{ value: '0', innerHTML: '', style: {{}} }}; }},
-        getElementsByTagName: function(t) {{ return []; }},
-        createElement: function(t) {{ return {{ style: {{}}, appendChild: function(){{}} }}; }},
-        documentElement: {{ style: {{}} }}
+        referrer: '',
+        // استخدام الجوكر لأي بحث عن العناصر
+        getElementById: (id) => safeObj,
+        getElementsByTagName: (t) => [safeObj],
+        querySelector: (s) => safeObj,
+        querySelectorAll: (s) => [safeObj],
+        createElement: (t) => safeObj,
+        documentElement: {{ style: {{}} }},
+        body: safeObj
     }};
+
     const location = window.location;
     const navigator = window.navigator;
     const screen = window.screen;
-    const localStorage = {{ getItem: ()=>null, setItem: ()=>{{}} }};
 
-    // المتغيرات المستخرجة
+    // ============================================================
+    // 3. كسر الوقت (Time Travel)
+    // نجبر أي مؤقت على العمل فوراً بدلاً من الانتظار
+    // ============================================================
+    const originalSetTimeout = setTimeout;
+    global.setTimeout = function(fn, delay) {{
+        try {{ fn(); }} catch(e) {{}} // نفذ فوراً!
+        return 1;
+    }};
+    global.setInterval = function(fn, delay) {{
+        try {{ fn(); }} catch(e) {{}} // نفذ مرة واحدة فوراً
+        return 1;
+    }};
+
+    // ============================================================
+    // 4. المتغيرات والاعتراض (Injection)
+    // ============================================================
     const MOVIE_ID = {config['MOVIE_ID']};
     const PLAYER_CUID = "{config['PLAYER_CUID']}";
     const IDENTIFIER = "{config['IDENTIFIER']}";
 
-    // مخزن النتيجة
-    let captured_params = null;
-
-    // 2. محاكاة jQuery الذكية (هذا هو سبب الحل)
+    // محاكاة jQuery
     const $ = function(param) {{
-        // إذا كان المدخل دالة (مثل $(document).ready)، نفذها فوراً!
-        if (typeof param === 'function') {{
-            param();
-        }}
+        if (typeof param === 'function') param(); // تشغيل $(document).ready
         return {{
-            val: function() {{ return '0'; }},
-            on: function() {{}},
-            text: function() {{}},
-            attr: function() {{}},
-            css: function() {{}},
-            ready: function(fn) {{ if(fn) fn(); }} // تنفيذ ready فوراً
+            val: () => '0',
+            on: () => {{}},
+            text: () => {{}},
+            attr: () => {{}},
+            css: () => {{}},
+            ready: (fn) => {{ if(fn) fn(); }},
+            click: () => {{}}
         }};
     }};
     
-    // اعتراض Ajax
     $.ajax = function(settings) {{
         if (settings.url && settings.url.indexOf('user_data') !== -1) {{
-            captured_params = settings.data;
-            captured_params['__url'] = settings.url;
-            
-            // طباعة النتيجة فوراً للخروج
-            console.log(JSON.stringify(captured_params));
+            settings.data['__url'] = settings.url;
+            console.log("JSON_START" + JSON.stringify(settings.data) + "JSON_END");
+            process.exit(0); // إنهاء ناجح فوراً
         }}
         return {{ done: ()=>{{}}, fail: ()=>{{}} }};
     }};
     $.post = function() {{}};
 
-    // 3. كود الموقع الأصلي
+    // ============================================================
+    // 5. تشغيل الكود المشفر
+    // ============================================================
     try {{
         {hs_code}
     }} catch (e) {{
-        // نتجاهل أخطاء hs.js غير المؤثرة
+        // تجاهل الأخطاء، المهم أن $.ajax تم استدعاؤه قبل الخطأ
     }}
     """
 
-    # كتابة الكود في ملف مؤقت
     filename = "runner.js"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(js_payload)
@@ -137,17 +177,16 @@ def run_node_script(config, hs_code):
         # تشغيل Node.js
         result = subprocess.run(["node", filename], capture_output=True, text=True, timeout=5)
         
-        # تنظيف الملف
         if os.path.exists(filename): os.remove(filename)
 
-        # قراءة الناتج (JSON)
-        output = result.stdout.strip()
-        if output and "{" in output:
-            # أحياناً يطبع Node تحذيرات، نأخذ آخر سطر json
-            json_str = output.split('\n')[-1]
-            return json.loads(json_str)
+        # استخراج JSON بدقة (بين العلامات)
+        output = result.stdout
+        match = re.search(r'JSON_START(.*?)JSON_END', output)
+        if match:
+            return json.loads(match.group(1))
         else:
-            print(f"⚠️ Node Output Error: {result.stderr}")
+            print(f"⚠️ Node Error Output: {result.stderr}")
+            print(f"⚠️ Node Stdout: {output}")
             return None
 
     except Exception as e:
@@ -155,33 +194,32 @@ def run_node_script(config, hs_code):
         return None
 
 # ==============================================================================
-# 3. API Endpoints
+# 3. Endpoints
 # ==============================================================================
 @app.route('/')
 def home():
-    return "Node-Powered Scraper is Running."
+    return "Robust Scraper Running."
 
 @app.route('/get-json')
 def fetch_data():
-    # 1. جلب الكود الأصلي
     config, hs_code = fetch_assets()
     if not hs_code:
         return jsonify({"status": "error", "message": "Failed to download hs.js"}), 500
 
-    # 2. تشغيل التشفير
     params = run_node_script(config, hs_code)
     
     if not params:
-        return jsonify({"status": "error", "message": "Failed to generate signature (Mock Environment Issue)"}), 500
+        return jsonify({"status": "error", "message": "Signature generation failed"}), 500
 
-    # 3. إرسال الطلب النهائي
     api_path = params.pop('__url', '/user_data')
     api_url = BASE_URL + api_path
     
+    # تحديث الهيدرز لتطابق المتصفح
     req_headers = HEADERS.copy()
     req_headers.update({
         "X-Requested-With": "XMLHttpRequest",
-        "Origin": BASE_URL
+        "Origin": BASE_URL,
+        "Accept": "application/json, text/javascript, */*; q=0.01"
     })
     
     try:
@@ -194,7 +232,6 @@ def fetch_data():
                 "data": json.loads(match.group(1))
             })
         else:
-            # في حال فشل، نعرض الرد لنعرف السبب
             return jsonify({
                 "status": "error", 
                 "message": "Invalid response from server", 
