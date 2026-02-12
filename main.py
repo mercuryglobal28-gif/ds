@@ -4,7 +4,7 @@ import re
 from playwright.sync_api import sync_playwright
 import os
 
-app = Flask(__name__)
+app = Flask(__main__)
 
 # إعدادات الهدف
 TARGET_URL = "https://kinovod120226.pro/serial/259509-predatelstvo"
@@ -90,3 +90,4 @@ def fetch_data():
 if __name__ == "__main__":
     # تشغيل محلي للتجربة
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+
