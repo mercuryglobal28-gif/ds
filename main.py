@@ -36,7 +36,6 @@ def fetch_assets():
             "IDENTIFIER": "unknown"
         }
         
-        # Regex مرن لاستخراج البيانات
         m_id = re.search(r"MOVIE_ID\s*[:=]\s*['\"]?(\d+)['\"]?", html)
         if m_id: config["MOVIE_ID"] = m_id.group(1)
             
@@ -61,14 +60,43 @@ def fetch_assets():
         return None, str(e)
 
 # ==============================================================================
-# 2. تشغيل Node.js (بيئة التصحيح القصوى)
+# 2. تشغيل Node.js (Magic Proxy Solution)
 # ==============================================================================
 def run_node_script(config, hs_code):
     js_payload = f"""
     // --- 1. Global Setup ---
     const globalScope = typeof global !== 'undefined' ? global : this;
-    
-    // --- 2. Mocking Browser Objects ---
+
+    // --- 2. THE MAGIC PROXY (The Black Hole) ---
+    // هذا الكائن يوافق على كل شيء ولا يرفض أي طلب
+    const MAGIC = new Proxy(function(){{}}, {{
+        get: function(target, prop) {{
+            // إذا طلب التحويل لنص أو رقم
+            if (prop === Symbol.toPrimitive) return () => 0;
+            if (prop === 'toString') return () => '0';
+            if (prop === 'valueOf') return () => 0;
+            
+            // خصائص محددة لتجنب الأخطاء المنطقية
+            if (prop === 'length') return 0;
+            if (prop === 'style') return {{ display: 'block', visibility: 'visible' }};
+            
+            // دائماً أعد نفس الكائن السحري (Chainable)
+            return MAGIC;
+        }},
+        set: function(target, prop, value) {{
+            // وافق على أي عملية تعيين قيمة (حل مشكلة rating)
+            return true;
+        }},
+        apply: function(target, thisArg, argumentsList) {{
+            // إذا تم استدعاؤه كدالة، أعد نفسه
+            return MAGIC;
+        }},
+        construct: function(target, args) {{
+            return MAGIC;
+        }}
+    }});
+
+    // --- 3. Mocking Browser Objects ---
     const window = {{
         location: {{ href: '{FULL_TARGET_URL}', hostname: 'kinovod120226.pro', origin: '{BASE_URL}', protocol: 'https:', pathname: '{TARGET_URI}', search: '' }},
         navigator: {{ userAgent: '{HEADERS['User-Agent']}', webdriver: false, plugins: [], languages: ['en-US'] }},
@@ -77,52 +105,43 @@ def run_node_script(config, hs_code):
         history: {{ pushState: ()=>{{}}, replaceState: ()=>{{}} }},
         innerWidth: 1920,
         innerHeight: 1080,
-        top: null,
-        self: null,
-        localStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
-        sessionStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }}
+        top: MAGIC,
+        self: MAGIC,
+        parent: MAGIC,
+        localStorage: MAGIC,
+        sessionStorage: MAGIC
     }};
-    window.top = window;
-    window.self = window;
     window.window = window;
 
-    // Document Proxy to handle getElementById etc.
-    const elementProxy = new Proxy({{}}, {{
-        get: (target, prop) => {{
-            if(prop === 'style') return {{ display: 'block' }};
-            if(prop === 'value') return '0';
-            if(prop === 'innerHTML') return '';
-            if(prop === 'getAttribute') return ()=>null;
-            if(prop === 'appendChild') return ()=>elementProxy;
-            return elementProxy; // Chainable
-        }}
-    }});
-    
     const document = {{
         location: window.location,
         cookie: '',
         referrer: '',
-        getElementById: (id) => elementProxy,
-        getElementsByTagName: (t) => [elementProxy],
-        querySelector: (s) => elementProxy,
-        querySelectorAll: (s) => [elementProxy],
-        createElement: (t) => elementProxy,
-        documentElement: {{ style: {{}} }},
-        body: elementProxy,
-        head: elementProxy,
+        getElementById: (id) => MAGIC,
+        getElementsByTagName: (t) => [MAGIC],
+        getElementsByClassName: (c) => [MAGIC],
+        querySelector: (s) => MAGIC,
+        querySelectorAll: (s) => [MAGIC],
+        createElement: (t) => MAGIC,
+        documentElement: MAGIC,
+        body: MAGIC,
+        head: MAGIC,
         addEventListener: (e, f) => {{ 
-            if(e==='DOMContentLoaded') setTimeout(f, 10); 
-        }}
+            // تشغيل الكود فوراً
+            if(e==='DOMContentLoaded' || e==='load') setTimeout(f, 1); 
+        }},
+        attachEvent: (e, f) => setTimeout(f, 1)
     }};
 
-    // --- 3. Expose Globals ---
+    // --- 4. Expose Globals ---
     globalScope.window = window;
     globalScope.document = document;
     globalScope.location = window.location;
     globalScope.navigator = window.navigator;
     globalScope.screen = window.screen;
+    globalScope.HTMLElement = function(){{}};
 
-    // --- 4. Interception Logic (The Trap) ---
+    // --- 5. Interception Logic ---
     function captureAndExit(data, url) {{
         const result = {{
             data: data,
@@ -132,12 +151,11 @@ def run_node_script(config, hs_code):
         process.exit(0);
     }}
 
-    // Mock XMLHttpRequest (Fallback)
+    // Mock XMLHttpRequest
     class XMLHttpRequest {{
         open(method, url) {{ this.url = url; }}
         send(data) {{
             if (this.url && this.url.indexOf('user_data') !== -1) {{
-                // Parse query string if data is null
                 let params = {{}};
                 if (this.url.includes('?')) {{
                      const searchParams = new URLSearchParams(this.url.split('?')[1]);
@@ -148,23 +166,23 @@ def run_node_script(config, hs_code):
         }}
         setRequestHeader() {{}}
         withCredentials = false;
+        onreadystatechange() {{}}
     }}
     globalScope.XMLHttpRequest = XMLHttpRequest;
 
-    // Mock jQuery (Primary)
+    // --- 6. JQUERY MOCK (Updated) ---
+    // هنا الإصلاح الرئيسي: $ يعيد MAGIC، و $.fn هو MAGIC أيضاً
     const $ = function(param) {{
         if (typeof param === 'function') {{ setTimeout(param, 1); }}
-        return {{
-            val: () => '0',
-            on: () => {{}},
-            text: () => {{}},
-            attr: () => {{}},
-            css: () => {{}},
-            ready: (fn) => {{ if(fn) setTimeout(fn, 1); }},
-            click: () => {{}}
-        }};
+        return MAGIC;
     }};
     
+    // إضافة الخصائص المفقودة لـ jQuery
+    $.fn = MAGIC;       // حل مشكلة $.fn.rating
+    $.rating = MAGIC;   // حل احتياطي
+    $.cookie = MAGIC;
+    
+    // اعتراض Ajax
     $.ajax = function(settings) {{
         if (settings.url && settings.url.indexOf('user_data') !== -1) {{
             captureAndExit(settings.data, settings.url);
@@ -178,22 +196,29 @@ def run_node_script(config, hs_code):
     window.$ = $;
     window.jQuery = $;
 
-    // --- 5. Inject Variables ---
+    // --- 7. Inject Variables ---
     globalScope.MOVIE_ID = {config['MOVIE_ID']};
     globalScope.PLAYER_CUID = "{config['PLAYER_CUID']}";
     globalScope.IDENTIFIER = "{config['IDENTIFIER']}";
 
-    // --- 6. Run the Code safely ---
+    // --- 8. Run Code ---
+    // كسر الوقت لتنفيذ المؤقتات فوراً
+    const originalSetTimeout = setTimeout;
+    global.setTimeout = function(fn, delay) {{
+        try {{ fn(); }} catch(e) {{}}
+        return 1;
+    }};
+
     try {{
         {hs_code}
     }} catch (e) {{
         console.error("RUNTIME_ERROR: " + e.message);
     }}
     
-    // Safety timeout: if nothing happens in 2 seconds
-    setTimeout(() => {{
-        console.error("TIMEOUT: No ajax request intercepted within 2 seconds.");
-    }}, 2000);
+    // Safety timeout increased slightly
+    originalSetTimeout(() => {{
+        console.error("TIMEOUT: No ajax request intercepted within 3 seconds.");
+    }}, 3000);
     """
 
     filename = "runner.js"
@@ -206,13 +231,13 @@ def run_node_script(config, hs_code):
         
         if os.path.exists(filename): os.remove(filename)
 
-        output = result.stdout + result.stderr # ندمج المخرجات لرؤية الأخطاء
+        output = result.stdout + result.stderr
         
         match = re.search(r'JSON_START(.*?)JSON_END', output)
         if match:
             return json.loads(match.group(1)), None
         else:
-            return None, output # إرجاع نص الخطأ كاملاً للتشخيص
+            return None, output
 
     except Exception as e:
         return None, f"Subprocess Error: {str(e)}"
@@ -222,27 +247,24 @@ def run_node_script(config, hs_code):
 # ==============================================================================
 @app.route('/')
 def home():
-    return "Debugger Scraper Running."
+    return "Magic Scraper Running."
 
 @app.route('/get-json')
 def fetch_data():
     config, result = fetch_assets()
     
-    # إذا كان result هو كود JS (نص طويل)
     if result and len(result) > 500:
         hs_code = result
     else:
         return jsonify({"status": "error", "message": "Failed to download hs.js", "details": str(result)}), 500
 
-    # تشغيل Node
     params, error_log = run_node_script(config, hs_code)
     
     if not params:
-        # هنا سنعرف السبب الحقيقي للفشل!
         return jsonify({
             "status": "error", 
             "message": "Signature generation failed", 
-            "debug_log": error_log # <--- هذا السطر سيخبرنا بالمشكلة
+            "debug_log": error_log 
         }), 500
 
     # تجهيز الطلب
@@ -257,10 +279,8 @@ def fetch_data():
     })
     
     try:
-        # إرسال الطلب مع التوقيع
         resp = requests.get(api_url, params=params, headers=req_headers, timeout=10)
         
-        # استخراج JSON
         match = re.search(r'(\[.*\])', resp.text, re.DOTALL)
         if match:
             return jsonify({
