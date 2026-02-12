@@ -3,8 +3,30 @@ import json
 import re
 from playwright.sync_api import sync_playwright
 import os
+import subprocess # <--- أضف هذه المكتبة
+
+# ==============================================================================
+# 🔥 إصلاح مشكلة Render: تثبيت المتصفح عند التشغيل
+# ==============================================================================
+def install_playwright():
+    print("🛠️ Checking Playwright browsers...")
+    try:
+        # محاولة تجريبية لتشغيل المتصفح
+        with sync_playwright() as p:
+            p.chromium.launch(headless=True).close()
+            print("✅ Browser found!")
+    except Exception as e:
+        print(f"⚠️ Browser not found ({e}). Installing now...")
+        # إذا فشل، نقوم بالتثبيت
+        subprocess.run(["playwright", "install", "chromium"])
+        print("✅ Browser installed successfully!")
+
+# استدعاء دالة التثبيت عند بدء السيرفر
+install_playwright()
 
 app = Flask(__name__)
+
+# ... (باقي الكود كما هو دون تغيير) ...
 
 # إعدادات الهدف
 TARGET_URL = "https://kinovod120226.pro/serial/259509-predatelstvo"
@@ -90,5 +112,6 @@ def fetch_data():
 if __name__ == "__main__":
     # تشغيل محلي للتجربة
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+
 
 
