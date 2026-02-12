@@ -1,92 +1,120 @@
 from flask import Flask, jsonify
+import execjs
+import requests
 import json
 import re
-from playwright.sync_api import sync_playwright
 import os
-import subprocess
-
-# تثبيت المتصفح عند البدء (Firefox أخف)
-def install_playwright():
-    print("🛠️ Checking Playwright (Firefox)...")
-    try:
-        subprocess.run(["playwright", "install", "firefox"])
-    except Exception as e:
-        print(f"⚠️ Install error: {e}")
-
-install_playwright()
 
 app = Flask(__name__)
-TARGET_URL = "https://kinovod120226.pro/serial/259509-predatelstvo"
 
-def get_video_data_lightweight():
-    print("🚀 بدء المعالجة (وضع توفير الذاكرة)...")
-    video_data = None
+# إعدادات ثابتة
+BASE_URL = "https://kinovod120226.pro"
+MOVIE_ID = 259509
+# حاول تحديث هذه القيم يدوياً إذا تغيرت، أو يمكن سحبها بـ requests بسيط (Regex)
+PLAYER_CUID = "3cc6fa6dd817a33293536224177e55c4" 
+IDENTIFIER = "Kv7l5lK5edlT6ZlYI4Yu"
+
+# بيئة المحاكاة (JS Mock)
+JS_ENV = f"""
+    var window = {{
+        location: {{
+            href: '{BASE_URL}/serial/{MOVIE_ID}-predatelstvo',
+            hostname: 'kinovod120226.pro',
+            protocol: 'https:',
+            origin: '{BASE_URL}'
+        }},
+        navigator: {{ userAgent: 'Mozilla/5.0' }},
+        screen: {{ width: 1920, height: 1080 }},
+        document: {{ cookie: '' }}
+    }};
+    var document = {{
+        location: window.location,
+        cookie: '',
+        getElementById: function(id) {{ return null; }},
+        getElementsByTagName: function(t) {{ return []; }},
+        createElement: function(t) {{ return {{ style: {{}}, appendChild: function(){{}} }}; }},
+        documentElement: {{ style: {{}} }}
+    }};
+    var location = window.location;
+    var navigator = window.navigator;
+    var screen = window.screen;
+    var localStorage = {{ getItem: function(){{}}, setItem: function(){{}} }};
     
-    with sync_playwright() as p:
-        # استخدام Firefox لأنه يستهلك ذاكرة أقل من Chrome
-        browser = p.firefox.launch(
-            headless=True,
-            args=["--no-remote"] # تقليل العمليات الخلفية
-        )
-        
-        # سياق صفحة واحد فقط بدون تخزين
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-            java_script_enabled=True, # نحتاج JS ليعمل hs.js
-            bypass_csp=True,
-            viewport={"width": 800, "height": 600} # شاشة صغيرة لتقليل الذاكرة
-        )
-        
-        page = context.new_page()
+    var MOVIE_ID = {MOVIE_ID};
+    var PLAYER_CUID = "{PLAYER_CUID}";
+    var IDENTIFIER = "{IDENTIFIER}";
 
-        # حظر صارم للموارد
-        page.route("**/*", lambda route: route.abort() 
-                   if route.request.resource_type in ["image", "stylesheet", "font", "media", "other"] 
-                   else route.continue_())
+    var captured_params = {{}};
+    
+    var $ = function(sel) {{ return {{ val: function(){{return 0}}, on: function(){{}}, text: function(){{}}, attr: function(){{}} }}; }};
+    $.ajax = function(settings) {{
+        if (settings.url && settings.url.indexOf('user_data') !== -1) {{
+            captured_params = settings.data;
+            captured_params['__url'] = settings.url;
+        }}
+        return {{ done: function(){{}}, fail: function(){{}} }};
+    }};
+    $.post = function() {{}};
+"""
 
-        def handle_response(response):
-            nonlocal video_data
-            if "user_data" in response.url and response.status == 200:
-                try:
-                    text = response.text()
-                    match = re.search(r'(\[.*\])', text, re.DOTALL)
-                    if match:
-                        print(f"🔥 تم الصيد!")
-                        video_data = json.loads(match.group(1))
-                except:
-                    pass
+def get_hs_js_content():
+    # محاولة تحميل ملف hs.js من الموقع
+    # الرابط قد يتغير، لذا نحاول تخمينه أو نستخدم رابطاً ثابتاً إذا عرفناه
+    # عادة يكون: /js/hs.js أو مشابه.
+    # للسهولة هنا: يفضل أن ترفع ملف hs.js مع مشروعك وتسميه 'hs.js'
+    if os.path.exists("hs.js"):
+        with open("hs.js", "r", encoding="utf-8") as f:
+            return f.read()
+    return None
 
-        page.on("response", handle_response)
+def run_js_engine():
+    hs_code = get_hs_js_content()
+    if not hs_code:
+        return None, "hs.js file not found"
 
-        try:
-            # مهلة قصيرة لتقليل الانتظار
-            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
-            
-            # انتظار ذكي
-            for _ in range(30):
-                if video_data: break
-                page.wait_for_timeout(500)
-                
-        except Exception as e:
-            print(f"❌ Error: {e}")
-        finally:
-            # تنظيف الذاكرة فوراً
-            context.close()
-            browser.close()
-
-    return video_data
+    full_script = JS_ENV + "\n" + hs_code + "\n" + "function getData(){ return JSON.stringify(captured_params); }"
+    
+    try:
+        # تحديد Node كمحرك تشغيل
+        ctx = execjs.get("Node").compile(full_script)
+        data_str = ctx.call("getData")
+        return json.loads(data_str), None
+    except Exception as e:
+        return None, str(e)
 
 @app.route('/')
 def home():
-    return "Lite Scraper Running"
+    return "JS Engine Scraper Running"
 
 @app.route('/get-json')
 def fetch_data():
+    params, error = run_js_engine()
+    
+    if error:
+        return jsonify({"status": "error", "message": error}), 500
+    
+    if not params:
+        return jsonify({"status": "error", "message": "Failed to generate signature"}), 500
+
+    # إرسال الطلب الحقيقي
+    api_url = BASE_URL + params.pop('__url', '/user_data')
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": f"{BASE_URL}/serial/{MOVIE_ID}",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    
     try:
-        data = get_video_data_lightweight()
-        if data:
-            return jsonify({"status": "success", "data": data})
-        return jsonify({"status": "error", "message": "No data found"}), 404
+        resp = requests.get(api_url, params=params, headers=headers, timeout=10)
+        
+        # استخراج JSON من الرد
+        match = re.search(r'(\[.*\])', resp.text, re.DOTALL)
+        if match:
+            clean_data = json.loads(match.group(1))
+            return jsonify({"status": "success", "data": clean_data})
+        else:
+            return jsonify({"status": "error", "message": "Invalid response format", "raw": resp.text[:200]}), 500
+            
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
