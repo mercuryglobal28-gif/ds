@@ -73,7 +73,7 @@ def intercept_network(route, request):
     # فلترة السكربتات
     if rt == "script":
         url = request.url.lower()
-        if "kinovod" in url or "hs.js" in url or "jquery" in url:
+        if "kinovod" in url or "hs.js" in url or "jquery" in url or "hls.js" in url:
             return route.continue_()
         return route.abort()
     
@@ -232,3 +232,4 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
