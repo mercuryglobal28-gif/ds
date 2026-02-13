@@ -23,11 +23,28 @@ HEADERS = {
 }
 
 # ==============================================================================
-# 1. جلب الملفات
+# 🔒 إعدادات البروكسي (Proxy Configuration)
+# ==============================================================================
+PROXY_HOST = "46.161.47.123:9771"
+PROXY_USER = "oFRHax"
+PROXY_PASS = "4yFtU8"
+
+# صيغة البروكسي لمكتبة requests
+PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
+PROXIES = {
+    "http": PROXY_URL,
+    "https": PROXY_URL
+}
+
+print(f"🌍 Using Proxy: {PROXY_HOST}")
+
+# ==============================================================================
+# 1. جلب الملفات (Scraping with Proxy)
 # ==============================================================================
 def fetch_assets():
     try:
-        response = requests.get(FULL_TARGET_URL, headers=HEADERS, timeout=15)
+        # لاحظ إضافة proxies=PROXIES هنا
+        response = requests.get(FULL_TARGET_URL, headers=HEADERS, proxies=PROXIES, timeout=20)
         html = response.text
         
         config = {
@@ -36,6 +53,7 @@ def fetch_assets():
             "IDENTIFIER": "unknown"
         }
         
+        # استخراج المتغيرات
         m_id = re.search(r"MOVIE_ID\s*[:=]\s*['\"]?(\d+)['\"]?", html)
         if m_id: config["MOVIE_ID"] = m_id.group(1)
             
@@ -51,7 +69,8 @@ def fetch_assets():
             script_url = script_match.group(1)
             if not script_url.startswith("http"): script_url = BASE_URL + script_url
             
-            js_resp = requests.get(script_url, headers=HEADERS, timeout=15)
+            # جلب السكربت أيضاً عبر البروكسي
+            js_resp = requests.get(script_url, headers=HEADERS, proxies=PROXIES, timeout=20)
             return config, js_resp.text
         else:
             return config, None
@@ -60,77 +79,62 @@ def fetch_assets():
         return None, str(e)
 
 # ==============================================================================
-# 2. تشغيل Node.js (Magic Proxy Solution)
+# 2. تشغيل Node.js (بيئة المحاكاة)
 # ==============================================================================
 def run_node_script(config, hs_code):
     js_payload = f"""
     // --- 1. Global Setup ---
     const globalScope = typeof global !== 'undefined' ? global : this;
 
-    // --- 2. THE MAGIC PROXY (The Black Hole) ---
-    // هذا الكائن يوافق على كل شيء ولا يرفض أي طلب
-    const MAGIC = new Proxy(function(){{}}, {{
+    // --- 2. DOM ELEMENT PROXY ONLY ---
+    const domProxy = new Proxy({{}}, {{
         get: function(target, prop) {{
-            // إذا طلب التحويل لنص أو رقم
-            if (prop === Symbol.toPrimitive) return () => 0;
-            if (prop === 'toString') return () => '0';
-            if (prop === 'valueOf') return () => 0;
-            
-            // خصائص محددة لتجنب الأخطاء المنطقية
-            if (prop === 'length') return 0;
+            if (prop === 'value') return '0';
             if (prop === 'style') return {{ display: 'block', visibility: 'visible' }};
-            
-            // دائماً أعد نفس الكائن السحري (Chainable)
-            return MAGIC;
+            if (prop === 'innerHTML') return '';
+            if (prop === 'getAttribute') return ()=>null;
+            if (prop === 'appendChild') return ()=>domProxy;
+            if (prop === 'addEventListener') return ()=>{{}};
+            return domProxy;
         }},
-        set: function(target, prop, value) {{
-            // وافق على أي عملية تعيين قيمة (حل مشكلة rating)
-            return true;
-        }},
-        apply: function(target, thisArg, argumentsList) {{
-            // إذا تم استدعاؤه كدالة، أعد نفسه
-            return MAGIC;
-        }},
-        construct: function(target, args) {{
-            return MAGIC;
-        }}
+        set: ()=>true
     }});
 
     // --- 3. Mocking Browser Objects ---
     const window = {{
         location: {{ href: '{FULL_TARGET_URL}', hostname: 'kinovod120226.pro', origin: '{BASE_URL}', protocol: 'https:', pathname: '{TARGET_URI}', search: '' }},
-        navigator: {{ userAgent: '{HEADERS['User-Agent']}', webdriver: false, plugins: [], languages: ['en-US'] }},
+        navigator: {{ userAgent: '{HEADERS['User-Agent']}', webdriver: false, plugins: [], languages: ['en-US'], platform: 'Win32' }},
         screen: {{ width: 1920, height: 1080, colorDepth: 24 }},
         document: {{ cookie: '', referrer: '{BASE_URL}' }},
         history: {{ pushState: ()=>{{}}, replaceState: ()=>{{}} }},
         innerWidth: 1920,
         innerHeight: 1080,
-        top: MAGIC,
-        self: MAGIC,
-        parent: MAGIC,
-        localStorage: MAGIC,
-        sessionStorage: MAGIC
+        top: null, 
+        self: null,
+        localStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
+        sessionStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
+        console: console
     }};
+    window.top = window;
+    window.self = window;
     window.window = window;
 
     const document = {{
         location: window.location,
         cookie: '',
-        referrer: '',
-        getElementById: (id) => MAGIC,
-        getElementsByTagName: (t) => [MAGIC],
-        getElementsByClassName: (c) => [MAGIC],
-        querySelector: (s) => MAGIC,
-        querySelectorAll: (s) => [MAGIC],
-        createElement: (t) => MAGIC,
-        documentElement: MAGIC,
-        body: MAGIC,
-        head: MAGIC,
+        referrer: '{BASE_URL}',
+        getElementById: (id) => domProxy,
+        getElementsByTagName: (t) => [domProxy],
+        getElementsByClassName: (c) => [domProxy],
+        querySelector: (s) => domProxy,
+        querySelectorAll: (s) => [domProxy],
+        createElement: (t) => domProxy,
+        documentElement: {{ style: {{}} }},
+        body: domProxy,
+        head: domProxy,
         addEventListener: (e, f) => {{ 
-            // تشغيل الكود فوراً
-            if(e==='DOMContentLoaded' || e==='load') setTimeout(f, 1); 
-        }},
-        attachEvent: (e, f) => setTimeout(f, 1)
+            if(e==='DOMContentLoaded' || e==='load') setTimeout(f, 10); 
+        }}
     }};
 
     // --- 4. Expose Globals ---
@@ -153,7 +157,12 @@ def run_node_script(config, hs_code):
 
     // Mock XMLHttpRequest
     class XMLHttpRequest {{
-        open(method, url) {{ this.url = url; }}
+        constructor() {{
+            this.readyState = 0;
+            this.status = 200;
+            this.onreadystatechange = null;
+        }}
+        open(method, url) {{ this.url = url; this.readyState = 1; }}
         send(data) {{
             if (this.url && this.url.indexOf('user_data') !== -1) {{
                 let params = {{}};
@@ -165,24 +174,29 @@ def run_node_script(config, hs_code):
             }}
         }}
         setRequestHeader() {{}}
-        withCredentials = false;
-        onreadystatechange() {{}}
     }}
     globalScope.XMLHttpRequest = XMLHttpRequest;
 
-    // --- 6. JQUERY MOCK (Updated) ---
-    // هنا الإصلاح الرئيسي: $ يعيد MAGIC، و $.fn هو MAGIC أيضاً
-    const $ = function(param) {{
-        if (typeof param === 'function') {{ setTimeout(param, 1); }}
-        return MAGIC;
+    // --- 6. JQUERY MOCK ---
+    const jQueryObj = {{
+        val: () => '0',
+        on: () => {{}},
+        text: () => {{}},
+        attr: () => {{}},
+        css: () => {{}},
+        ready: (fn) => {{ if(fn) setTimeout(fn, 10); }},
+        click: () => {{}},
+        rating: function() {{ return this; }}
     }};
     
-    // إضافة الخصائص المفقودة لـ jQuery
-    $.fn = MAGIC;       // حل مشكلة $.fn.rating
-    $.rating = MAGIC;   // حل احتياطي
-    $.cookie = MAGIC;
-    
-    // اعتراض Ajax
+    const $ = function(param) {{
+        if (typeof param === 'function') {{ setTimeout(param, 10); }}
+        return jQueryObj;
+    }};
+
+    $.fn = jQueryObj;
+    $.rating = () => {{}};
+    $.cookie = () => {{}};
     $.ajax = function(settings) {{
         if (settings.url && settings.url.indexOf('user_data') !== -1) {{
             captureAndExit(settings.data, settings.url);
@@ -202,23 +216,15 @@ def run_node_script(config, hs_code):
     globalScope.IDENTIFIER = "{config['IDENTIFIER']}";
 
     // --- 8. Run Code ---
-    // كسر الوقت لتنفيذ المؤقتات فوراً
-    const originalSetTimeout = setTimeout;
-    global.setTimeout = function(fn, delay) {{
-        try {{ fn(); }} catch(e) {{}}
-        return 1;
-    }};
-
     try {{
         {hs_code}
     }} catch (e) {{
         console.error("RUNTIME_ERROR: " + e.message);
     }}
     
-    // Safety timeout increased slightly
-    originalSetTimeout(() => {{
-        console.error("TIMEOUT: No ajax request intercepted within 3 seconds.");
-    }}, 3000);
+    setTimeout(() => {{
+        console.error("TIMEOUT_ERROR: Script finished without Ajax call.");
+    }}, 5000);
     """
 
     filename = "runner.js"
@@ -226,31 +232,32 @@ def run_node_script(config, hs_code):
         f.write(js_payload)
 
     try:
-        # تشغيل Node.js
-        result = subprocess.run(["node", filename], capture_output=True, text=True, timeout=5)
+        # تشغيل Node (محلياً) لاستخراج التوقيع
+        result = subprocess.run(["node", filename], capture_output=True, text=True, timeout=8)
         
         if os.path.exists(filename): os.remove(filename)
 
         output = result.stdout + result.stderr
-        
         match = re.search(r'JSON_START(.*?)JSON_END', output)
         if match:
             return json.loads(match.group(1)), None
         else:
-            return None, output
+            debug_info = output.replace(hs_code[:100], "CODE_START...") if hs_code else output
+            return None, debug_info
 
     except Exception as e:
         return None, f"Subprocess Error: {str(e)}"
 
 # ==============================================================================
-# 3. Endpoints
+# 3. API Endpoints
 # ==============================================================================
 @app.route('/')
 def home():
-    return "Magic Scraper Running."
+    return "Proxy Scraper Running."
 
 @app.route('/get-json')
 def fetch_data():
+    # 1. جلب الملفات (عبر البروكسي)
     config, result = fetch_assets()
     
     if result and len(result) > 500:
@@ -258,6 +265,7 @@ def fetch_data():
     else:
         return jsonify({"status": "error", "message": "Failed to download hs.js", "details": str(result)}), 500
 
+    # 2. تشغيل المحرك (محلياً بدون نت)
     params, error_log = run_node_script(config, hs_code)
     
     if not params:
@@ -267,7 +275,7 @@ def fetch_data():
             "debug_log": error_log 
         }), 500
 
-    # تجهيز الطلب
+    # 3. جلب البيانات النهائية (عبر البروكسي)
     api_path = params.pop('__url', '/user_data')
     if api_path.startswith("http"): api_url = api_path
     else: api_url = BASE_URL + api_path
@@ -279,12 +287,14 @@ def fetch_data():
     })
     
     try:
-        resp = requests.get(api_url, params=params, headers=req_headers, timeout=10)
+        # استخدام البروكسي في الطلب النهائي أيضاً
+        resp = requests.get(api_url, params=params, headers=req_headers, proxies=PROXIES, timeout=20)
         
         match = re.search(r'(\[.*\])', resp.text, re.DOTALL)
         if match:
             return jsonify({
                 "status": "success", 
+                "proxy_used": PROXY_HOST,
                 "data": json.loads(match.group(1))
             })
         else:
