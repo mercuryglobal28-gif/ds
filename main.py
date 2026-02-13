@@ -1,6 +1,11 @@
-# ==============================================================================
-# 🔍🚀 المنطق الرئيسي: بحث + استخراج (مصحح للأفلام والمسلسلات)
-# ==============================================================================
+import os
+import json
+from flask import Flask, request, jsonify
+from playwright.sync_api import sync_playwright
+
+# ✅✅✅ هذا السطر هو الأهم، يجب أن يكون هنا في البداية
+app = Flask(__name__)
+
 def search_and_scrape(query_text):
     global browser_instance
     print(f"🔎 البحث عن: {query_text}", flush=True)
@@ -112,3 +117,4 @@ def search_and_scrape(query_text):
             context.close()
 
     return captured_data
+
