@@ -67,176 +67,174 @@ def fetch_assets():
         return None, str(e)
 
 # ==============================================================================
-# 2. تشغيل Node.js (Smart jQuery Mock)
+# 2. تشغيل Node.js (Eager Execution Environment)
 # ==============================================================================
 def run_node_script(config, hs_code):
     js_payload = f"""
-    // --- 1. Global Setup ---
     const globalScope = typeof global !== 'undefined' ? global : this;
 
-    // --- 2. JQUERY MOCK (The Fix) ---
-    // هذا الكائن يحاكي دوال jQuery الحقيقية
-    const JQ_METHODS = {{
-        // الوظيفة الأهم: المحاكاة للتكرار
-        each: function(callback) {{
-            // نتظاهر بأننا وجدنا عنصراً واحداً وننفذ الكود عليه
-            if (typeof callback === 'function') {{
-                try {{
-                    // call(context, index, element)
-                    callback.call(this, 0, this); 
-                }} catch(e) {{}}
-            }}
-            return this;
-        }},
-        // التعامل مع البيانات
-        data: function(k, v) {{
-            if (v === undefined) return {{}}; 
-            return this;
-        }},
-        // دوال التنسيق والـ DOM (Chainable)
-        css: function() {{ return this; }},
-        attr: function() {{ return ''; }},
-        prop: function() {{ return false; }},
+    // --- 1. Interception Logic ---
+    function captureAndExit(data, url) {{
+        const result = {{
+            data: data,
+            __url: url
+        }};
+        console.log("JSON_START" + JSON.stringify(result) + "JSON_END");
+        process.exit(0);
+    }}
+
+    // --- 2. JQUERY MOCK (Eager Mode) ---
+    // هذا الكائن يمثل أي عنصر يتم اختياره بواسطة $
+    const JQ_ELEMENT = {{
+        length: 1, // هام جداً: نجعل السكربت يظن أن العناصر موجودة
         val: function() {{ return '0'; }},
-        width: function() {{ return 100; }},
-        height: function() {{ return 100; }},
-        offset: function() {{ return {{left:0, top:0}}; }},
+        text: function() {{ return ''; }},
+        attr: function() {{ return ''; }},
+        css: function() {{ return ''; }},
+        data: function() {{ return {{}}; }},
+        prop: function() {{ return false; }},
+        width: function() {{ return 1920; }},
+        height: function() {{ return 1080; }},
+        offset: function() {{ return {{top:0, left:0}}; }},
         index: function() {{ return 0; }},
         
-        // التلاعب بالعناصر
+        // التلاعب
         append: function() {{ return this; }},
         appendTo: function() {{ return this; }},
         insertBefore: function() {{ return this; }},
         find: function() {{ return this; }},
-        slice: function() {{ return this; }},
         eq: function() {{ return this; }},
+        slice: function() {{ return this; }},
         
         // الأحداث
         on: function() {{ return this; }},
         trigger: function() {{ return this; }},
-        unbind: function() {{ return this; }}
-    }};
-
-    // Proxy للتعامل مع أي دالة غير معرفة (Chainable)
-    const JQ_PROXY_HANDLER = {{
-        get: function(target, prop) {{
-            if (prop in target) return target[prop];
-            // إذا طلب دالة غير موجودة، أعد دالة ترجع الـ Proxy نفسه
-            return function() {{ return new Proxy(target, JQ_PROXY_HANDLER); }};
-        }},
-        set: function() {{ return true; }}
+        
+        // التكرار: ينفذ الكود مرة واحدة
+        each: function(cb) {{
+            if (typeof cb === 'function') {{ try {{ cb.call(this, 0, this); }} catch(e){{}} }}
+            return this;
+        }}
     }};
 
     // الدالة الرئيسية $
     const $ = function(selector) {{
-        // إذا كان المدخل دالة (document.ready)، نفذها فوراً
+        // إذا كان دالة (ready)، نفذها فوراً
         if (typeof selector === 'function') {{
-            setTimeout(selector, 10);
+            try {{ selector(); }} catch(e) {{ console.error("JQ_READY_ERR: "+e.message); }}
             return;
         }}
-        // أعد كائن jQuery الوهمي
-        return new Proxy(JQ_METHODS, JQ_PROXY_HANDLER);
+        // إذا كان اختيار عنصر، أعد العنصر الوهمي
+        return JQ_ELEMENT;
     }};
 
-    // ربط الـ Prototype (مهم جداً للإضافات مثل rating)
-    $.fn = JQ_METHODS;
-    
-    // أدوات jQuery المساعدة
+    // الإضافات
+    $.fn = JQ_ELEMENT;
     $.extend = function(target, ...sources) {{ return target || {{}}; }};
-    $.noop = function() {{}};
+    $.rating = function() {{}};
+    $.cookie = function() {{}};
     $.isFunction = function(f) {{ return typeof f === 'function'; }};
     
-    // اعتراض Ajax
+    // Ajax
     $.ajax = function(settings) {{
         if (settings.url && settings.url.indexOf('user_data') !== -1) {{
             captureAndExit(settings.data, settings.url);
         }}
         return {{ done: ()=>{{}}, fail: ()=>{{}} }};
     }};
-    $.post = function() {{}};
+    $.post = $.ajax;
 
-    // نشر jQuery للعامة
+    // نشر jQuery
     globalScope.$ = $;
     globalScope.jQuery = $;
     
-    // --- 3. DOM Mock ---
-    const domProxy = new Proxy({{}}, {{
-        get: (t, p) => {{
-            if (p==='style') return {{}};
-            if (p==='value') return '0';
-            return domProxy;
-        }},
-        set: ()=>true
-    }});
-    
+    // --- 3. Browser Objects Mock ---
     const window = {{
         location: {{ href: '{FULL_TARGET_URL}', hostname: 'kinovod120226.pro', origin: '{BASE_URL}', protocol: 'https:', pathname: '{TARGET_URI}', search: '' }},
-        navigator: {{ userAgent: '{HEADERS['User-Agent']}' }},
+        navigator: {{ userAgent: '{HEADERS['User-Agent']}', webdriver: false }},
         document: {{ cookie: '' }},
         screen: {{ width: 1920, height: 1080 }},
-        top: domProxy, self: domProxy,
         localStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
         sessionStorage: {{ getItem: ()=>null, setItem: ()=>{{}} }},
-        console: console
+        console: console,
+        innerWidth: 1920,
+        innerHeight: 1080
     }};
     window.window = window;
+    window.self = window;
+    window.top = window;
 
     const document = {{
         location: window.location,
         cookie: '',
         referrer: '{BASE_URL}',
-        getElementById: () => domProxy,
-        getElementsByTagName: () => [domProxy],
-        querySelector: () => domProxy,
-        querySelectorAll: () => [domProxy],
-        createElement: () => domProxy,
+        // أي بحث عن عنصر يعيد العنصر الوهمي الذي طوله 1
+        getElementById: () => JQ_ELEMENT,
+        getElementsByTagName: () => [JQ_ELEMENT],
+        querySelector: () => JQ_ELEMENT,
+        querySelectorAll: () => [JQ_ELEMENT],
+        createElement: () => JQ_ELEMENT,
         documentElement: {{ style: {{}} }},
-        body: domProxy,
-        addEventListener: (e,f) => {{ if(e==='DOMContentLoaded'||e==='load') setTimeout(f,10); }}
+        body: JQ_ELEMENT,
+        // تسجيل الأحداث وتنفيذها فوراً
+        addEventListener: (e,f) => {{ if(e==='DOMContentLoaded'||e==='load') f(); }}
     }};
 
     globalScope.window = window;
     globalScope.document = document;
     globalScope.location = window.location;
     globalScope.navigator = window.navigator;
+    globalScope.screen = window.screen;
 
-    // --- 4. Interception ---
-    function captureAndExit(data, url) {{
-        const result = {{ data: data, __url: url }};
-        console.log("JSON_START" + JSON.stringify(result) + "JSON_END");
-        process.exit(0);
-    }}
-
-    class XMLHttpRequest {{
-        open(method, url) {{ this.url = url; }}
-        send(data) {{
-            if (this.url && this.url.indexOf('user_data') !== -1) {{
-                let params = {{}};
-                if (this.url.includes('?')) {{
-                     const searchParams = new URLSearchParams(this.url.split('?')[1]);
-                     for(const [key, value] of searchParams) params[key] = value;
-                }}
-                captureAndExit(params, this.url.split('?')[0]);
+    // Mock XMLHttpRequest just in case
+    globalScope.XMLHttpRequest = class {{
+        open(m, u) {{ this.url = u; }}
+        send(d) {{
+            if (this.url && this.url.includes('user_data')) {{
+                 // Simple parser
+                 let p = {{}};
+                 if(this.url.includes('?')) {{
+                     this.url.split('?')[1].split('&').forEach(pair => {{
+                         const [k,v] = pair.split('=');
+                         p[k] = decodeURIComponent(v||'');
+                     }});
+                 }}
+                 captureAndExit(p, this.url.split('?')[0]);
             }}
         }}
         setRequestHeader() {{}}
-    }}
-    globalScope.XMLHttpRequest = XMLHttpRequest;
+    }};
 
-    // --- 5. Run ---
+    // --- 4. Variables ---
     globalScope.MOVIE_ID = {config['MOVIE_ID']};
     globalScope.PLAYER_CUID = "{config['PLAYER_CUID']}";
     globalScope.IDENTIFIER = "{config['IDENTIFIER']}";
 
+    // --- 5. Override Timers (Time Travel) ---
+    // أي setTimeout يتم تنفيذه فوراً
+    const originalSetTimeout = setTimeout;
+    global.setTimeout = function(fn, delay) {{
+        try {{ fn(); }} catch(e) {{}}
+        return 1;
+    }};
+    global.setInterval = function(fn, delay) {{
+        try {{ fn(); }} catch(e) {{}}
+        return 1;
+    }};
+
+    // --- 6. Run Code ---
     try {{
         {hs_code}
     }} catch (e) {{
-        console.error("RUNTIME_ERROR: " + e.message);
+        // Log error but don't exit, maybe ajax was queued
+        console.error("RUNTIME_EXEC_ERR: " + e.message);
     }}
-
-    setTimeout(() => {{
+    
+    // Safety check with original timer
+    originalSetTimeout(() => {{
+        // If we are here, process.exit(0) wasn't called
         console.error("TIMEOUT_ERROR: Script finished without Ajax call.");
-    }}, 6000);
+    }}, 4000);
     """
 
     filename = "runner.js"
@@ -244,7 +242,7 @@ def run_node_script(config, hs_code):
         f.write(js_payload)
 
     try:
-        result = subprocess.run(["node", filename], capture_output=True, text=True, timeout=8)
+        result = subprocess.run(["node", filename], capture_output=True, text=True, timeout=6)
         if os.path.exists(filename): os.remove(filename)
 
         output = result.stdout + result.stderr
@@ -261,7 +259,7 @@ def run_node_script(config, hs_code):
 # ==============================================================================
 @app.route('/')
 def home():
-    return "Final Scraper Running."
+    return "Eager Scraper Running."
 
 @app.route('/get-json')
 def fetch_data():
