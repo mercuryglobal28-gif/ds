@@ -1,12 +1,14 @@
 import os
 import json
-import time
+from flask import Flask, jsonify
 from playwright.sync_api import sync_playwright
 
+# إعداد تطبيق Flask
+app = Flask(__name__)
+
 # ==============================================================================
-# ⚙️ الإعدادات (قراءة من متغيرات البيئة للأمان)
+# ⚙️ الإعدادات
 # ==============================================================================
-# إذا لم تجد المتغيرات، ستستخدم القيم الافتراضية الموجودة هنا
 PROXY_SERVER = os.getenv("PROXY_SERVER", "46.161.47.123:9771")
 PROXY_USER = os.getenv("PROXY_USER", "oFRHax")
 PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
@@ -14,13 +16,12 @@ PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
 TARGET_URL = "https://kinovod120226.pro/serial/259509-predatelstvo"
 
 # ==============================================================================
-# 🛡️ منطق الفلترة
+# 🛡️ منطق الفلترة (كما هو)
 # ==============================================================================
 def intercept_network(route, request):
     url = request.url.lower()
     resource_type = request.resource_type
 
-    # تحسين السرعة
     if any(x in url for x in ["hls.js", "favicon", ".ico", ".svg"]):
         return route.abort()
 
@@ -40,17 +41,17 @@ def intercept_network(route, request):
     route.continue_()
 
 # ==============================================================================
-# 🚀 المشغل الرئيسي
+# 🚀 دالة الجاسوس (تُستدعى عند الطلب)
 # ==============================================================================
-def run_optimized_spy_blocked_master():
-    print("🚀 تشغيل الجاسوس الذكي على Render...", flush=True)
-    
+def scrape_logic():
+    print("🚀 بدء عملية الاستخراج...", flush=True)
     captured_data = None
 
     with sync_playwright() as p:
+        browser = None
         try:
             browser = p.chromium.launch(
-                headless=True, # يجب أن يكون True في السيرفرات
+                headless=True,
                 proxy={
                     "server": f"http://{PROXY_SERVER}",
                     "username": PROXY_USER,
@@ -59,7 +60,7 @@ def run_optimized_spy_blocked_master():
                 args=[
                     "--no-sandbox", 
                     "--disable-setuid-sandbox", 
-                    "--disable-dev-shm-usage", # مهم جداً لـ Docker
+                    "--disable-dev-shm-usage",
                     "--disable-gpu", 
                     "--blink-settings=imagesEnabled=false"
                 ]
@@ -68,7 +69,6 @@ def run_optimized_spy_blocked_master():
             page = browser.new_page()
             page.route("**/*", intercept_network)
 
-            # حقن كود اعتراض JSON
             spy_script = """
             const originalParse = JSON.parse;
             JSON.parse = function(text, reviver) {
@@ -84,7 +84,6 @@ def run_optimized_spy_blocked_master():
             def handle_console(msg):
                 nonlocal captured_data
                 if "$$$CAPTURED$$$" in msg.text:
-                    print("🎯 تم التقاط البيانات المفكوكة!", flush=True)
                     clean_json = msg.text.replace("$$$CAPTURED$$$", "")
                     try:
                         captured_data = json.loads(clean_json)
@@ -93,34 +92,41 @@ def run_optimized_spy_blocked_master():
 
             page.on("console", handle_console)
 
-            print(f"🌍 جاري التحميل: {TARGET_URL}", flush=True)
+            print(f"🌍 تحميل الصفحة: {TARGET_URL}", flush=True)
             page.goto(TARGET_URL, timeout=60000, wait_until="commit")
             
-            print("⏳ انتظار البيانات...", flush=True)
+            # الانتظار حتى يتم التقاط البيانات
             for i in range(30):
                 if captured_data:
                     break
                 page.wait_for_timeout(1000)
-                # محاكاة حركة ماوس بسيطة
                 try:
                     page.mouse.move(100, i*10)
                 except:
                     pass
 
         except Exception as e:
-            print(f"⚠️ خطأ أثناء التشغيل: {e}", flush=True)
+            print(f"⚠️ خطأ: {e}", flush=True)
+            return {"error": str(e)}
         
         finally:
-            if 'browser' in locals():
+            if browser:
                 browser.close()
 
-    if captured_data:
-        print("\n" + "="*50)
-        print("🎉 البيانات النهائية:")
-        # طباعة JSON في الـ Logs لتتمكن من رؤيتها في Render Dashboard
-        print(json.dumps(captured_data, indent=4, ensure_ascii=False), flush=True)
-    else:
-        print("❌ لم يتم التقاط البيانات.", flush=True)
+    return captured_data
 
+# ==============================================================================
+# 🌐 مسار الويب (الرابط الرئيسي)
+# ==============================================================================
+@app.route('/')
+def index():
+    data = scrape_logic()
+    if data:
+        return jsonify(data)
+    else:
+        return jsonify({"status": "failed", "message": "No data captured"}), 500
+
+# تشغيل السيرفر (مهم لـ Render)
 if __name__ == "__main__":
-    run_optimized_spy_blocked_master()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
