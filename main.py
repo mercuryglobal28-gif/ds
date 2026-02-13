@@ -65,12 +65,13 @@ def get_browser():
 # ==============================================================================
 def intercept_network(route, request):
     rt = request.resource_type
-    if any(x in url for x in ["hls.js", "favicon", ".ico", ".svg"]):
-        return route.abort()
+    
     # حظر الصور، الفيديو، الخطوط، وملفات التصميم CSS
     if rt in ["image", "media", "font", "stylesheet", "other"]:
         return route.abort()
-    
+   
+    if any(x in url for x in ["hls.js", "favicon", ".ico", ".svg"]):
+        return route.abort()
     # فلترة السكربتات
     if rt == "script":
         url = request.url.lower()
@@ -233,5 +234,6 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
 
 
