@@ -70,8 +70,6 @@ def intercept_network(route, request):
     if rt in ["image", "media", "font", "stylesheet", "other"]:
         return route.abort()
    
-    if any(x in url for x in ["hls.js", "favicon", ".ico", ".svg"]):
-        return route.abort()
     # فلترة السكربتات
     if rt == "script":
         url = request.url.lower()
@@ -234,6 +232,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
 
 
 
