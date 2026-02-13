@@ -3,7 +3,6 @@ import json
 from flask import Flask, jsonify
 from playwright.sync_api import sync_playwright
 
-# إعداد تطبيق Flask
 app = Flask(__name__)
 
 # ==============================================================================
@@ -16,7 +15,7 @@ PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
 TARGET_URL = "https://kinovod120226.pro/serial/259509-predatelstvo"
 
 # ==============================================================================
-# 🛡️ منطق الفلترة (كما هو)
+# 🛡️ منطق الفلترة
 # ==============================================================================
 def intercept_network(route, request):
     url = request.url.lower()
@@ -41,7 +40,7 @@ def intercept_network(route, request):
     route.continue_()
 
 # ==============================================================================
-# 🚀 دالة الجاسوس (تُستدعى عند الطلب)
+# 🚀 دالة الجاسوس
 # ==============================================================================
 def scrape_logic():
     print("🚀 بدء عملية الاستخراج...", flush=True)
@@ -95,7 +94,6 @@ def scrape_logic():
             print(f"🌍 تحميل الصفحة: {TARGET_URL}", flush=True)
             page.goto(TARGET_URL, timeout=60000, wait_until="commit")
             
-            # الانتظار حتى يتم التقاط البيانات
             for i in range(30):
                 if captured_data:
                     break
@@ -116,17 +114,26 @@ def scrape_logic():
     return captured_data
 
 # ==============================================================================
-# 🌐 مسار الويب (الرابط الرئيسي)
+# 🌐 مسارات الويب (التعديل المهم هنا)
 # ==============================================================================
+
+# 1. الصفحة الرئيسية: سريعة جداً لكي يطمئن Render أن السيرفر يعمل
 @app.route('/')
 def index():
+    return jsonify({
+        "status": "Running",
+        "message": "Server is active. Go to /scrape to get data."
+    })
+
+# 2. صفحة الجلب: هنا يحدث العمل الثقيل
+@app.route('/scrape')
+def scrape():
     data = scrape_logic()
     if data:
         return jsonify(data)
     else:
         return jsonify({"status": "failed", "message": "No data captured"}), 500
 
-# تشغيل السيرفر (مهم لـ Render)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
