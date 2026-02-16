@@ -56,7 +56,7 @@ def intercept_network(route, request):
     return route.continue_()
 
 # ==============================================================================
-# 🔍🚀 المنطق الرئيسي (المنقّح)
+# 🔍🚀 المنطق الرئيسي
 # ==============================================================================
 def search_and_scrape(query_text):
     global browser_instance
@@ -87,15 +87,13 @@ def search_and_scrape(query_text):
         except Exception as e:
             return {"error": f"Search failed: {e}"}
 
-        # 2. حقن الجاسوس (محسّن جداً)
+        # 2. حقن الجاسوس (للمسلسلات - XHR)
         spy_script = """
         const originalParse = JSON.parse;
         JSON.parse = function(text, reviver) {
             try {
                 const result = originalParse(text, reviver);
                 const str = JSON.stringify(result);
-                
-                // التقاط المسلسلات (مصفوفة) أو الأفلام (إذا كان يحتوي على ملف MP4)
                 if (str.includes('.mp4') || str.includes('.m3u8')) {
                     if (Array.isArray(result) || result.file || (result.items && result.items.length > 0)) {
                          console.log('$$$CAPTURED$$$' + str);
@@ -119,29 +117,45 @@ def search_and_scrape(query_text):
         print("🚀 الدخول للصفحة...", flush=True)
         page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
 
-        # 3. محاولة الالتقاط (تلقائي + يدوي)
-        for i in range(20): # 10 ثواني (20 * 0.5)
+        # 3. حلقة الانتظار + المسح الشامل (للأفلام - Global Object)
+        for i in range(20): # 10 ثواني كحد أقصى
             if captured_data: break
             
-            # محاولة استخراج يدوية للأفلام (Plan B)
-            # نفحص المتغيرات العامة في الصفحة التي قد تحتوي الرابط
-            if i % 4 == 0: # كل ثانيتين
-                try:
-                    # نحاول قراءة متغيرات مشهورة يستخدمها المشغل
-                    manual_data = page.evaluate("""() => {
-                        // البحث عن أي متغير يحتوي على رابط mp4
-                        if (window.flashvars && window.flashvars.file) return {file: window.flashvars.file};
-                        if (window.config && window.config.file) return {file: window.config.file};
-                        if (window.pl && window.pl.file) return {file: window.pl.file};
-                        return null;
-                    }""")
-                    if manual_data:
-                        captured_data = manual_data
-                        break
-                except: pass
+            # 💡 السحر هنا: فحص ذاكرة المتصفح بحثاً عن الكائن الذي أرسلته لي
+            # نبحث عن أي متغير يحتوي على خاصية 'file' وبداخله رابط 'http' أو '[360p]'
+            try:
+                manual_data = page.evaluate("""() => {
+                    // 1. فحص المتغيرات المعروفة
+                    if (window.flashvars && window.flashvars.file) return window.flashvars;
+                    if (window.config && window.config.file) return window.config;
+                    
+                    // 2. المسح الشامل لكل متغيرات النافذة (Window)
+                    // هذا سيجد الكائن الذي أرسلته لي {id: 'videoplayer', file: ...}
+                    for (const key in window) {
+                        try {
+                            const obj = window[key];
+                            if (obj && typeof obj === 'object' && obj.file) {
+                                // التأكد أنه رابط فيديو حقيقي
+                                if (typeof obj.file === 'string' && (obj.file.includes('http') || obj.file.includes('['))) {
+                                    return obj;
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    return null;
+                }""")
+                
+                if manual_data:
+                    print("🎉 تم العثور على البيانات عبر المسح الشامل!", flush=True)
+                    captured_data = manual_data
+                    break
+            except: pass
 
-            page.mouse.move(100, 100 + i*10)
             page.wait_for_timeout(500)
+            if i % 2 == 0: 
+                # حركة بسيطة قد تساعد في تفعيل السكربتات
+                try: page.mouse.move(100, 100 + i*10)
+                except: pass
 
     except Exception as e:
         print(f"⚠️ خطأ: {e}", flush=True)
