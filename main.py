@@ -14,7 +14,7 @@ PROXY_SERVER = os.getenv("PROXY_SERVER", "46.161.47.123:9771")
 PROXY_USER = os.getenv("PROXY_USER", "oFRHax")
 PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
 
-BASE_URL = "https://kinovod120226.pro"
+BASE_URL = "https://kinovod160226.pro"
 
 playwright_instance = None
 browser_instance = None
@@ -186,3 +186,4 @@ def scrape():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
