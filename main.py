@@ -1,130 +1,101 @@
-import os
+from playwright.sync_api import sync_playwright
 import json
 import time
 import re
-import requests
-from flask import Flask, request, jsonify
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup  # ⚠️ تأكد من تثبيت: pip install beautifulsoup4 requests
-
-app = Flask(__name__)
 
 # ==============================================================================
-# ⚙️ الإعدادات والثوابت
+# ⚙️ الإعدادات
 # ==============================================================================
-PROXY_HOST = os.getenv("PROXY_HOST", "46.161.47.123")
-PROXY_PORT = os.getenv("PROXY_PORT", "9771")
-PROXY_USER = os.getenv("PROXY_USER", "oFRHax")
-PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
-BASE_URL = "https://kinovod120226.pro"
+PROXY_SERVER = "46.161.47.123:9771"
+PROXY_USER = "oFRHax"
+PROXY_PASS = "4yFtU8"
 
-# إعداد البروكسي لمكتبة Requests
-REQUESTS_PROXY = {
-    "http": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}",
-    "https": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}",
-}
-
-# هيدرز لتبدو كمتصفح حقيقي (مهم جداً لتجنب الحظر)
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Referer": BASE_URL
-}
+# جرب رابط فيلم هنا للتأكد
+TARGET_URL = "https://kinovod120226.pro/film/259706-bokser" 
 
 # ==============================================================================
-# 🚀 المرحلة الأولى: البحث السريع (بدون متصفح)
+# 🛡️ منطق الفلترة (معدل قليلاً للسماح بطلبات الفيديو)
 # ==============================================================================
-def fast_search(query_text):
-    print(f"⚡ [Phase 1] جاري البحث السريع عن: {query_text}...", flush=True)
-    try:
-        search_url = f"{BASE_URL}/search"
-        params = {"query": query_text}
-        
-        # طلب HTML مباشرة
-        resp = requests.get(
-            search_url, 
-            params=params, 
-            headers=HEADERS, 
-            proxies=REQUESTS_PROXY, 
-            timeout=15
-        )
-        
-        if resp.status_code != 200:
-            return None, f"HTTP Error: {resp.status_code}"
+def intercept_network(route, request):
+    url = request.url.lower()
+    resource_type = request.resource_type
 
-        # تحليل HTML
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # البحث عن أول نتيجة في القائمة (.items .item a)
-        first_item = soup.select_one(".items .item a")
-        
-        if first_item and first_item.get('href'):
-            full_url = BASE_URL + first_item['href']
-            print(f"✅ تم العثور على الرابط: {full_url}", flush=True)
-            return full_url, None
-        
-        return None, "Not found"
+    # السماح بطلبات البيانات المهمة (JSON / XHR)
+    if "vod" in url or "user_data" in url:
+        return route.continue_()
 
-    except Exception as e:
-        print(f"⚠️ خطأ في البحث السريع: {e}", flush=True)
-        return None, str(e)
-
-# ==============================================================================
-# 🖥️ المرحلة الثانية: فتح المتصفح والاستخراج
-# ==============================================================================
-def browser_scrape(target_url):
-    print(f"🐢 [Phase 2] تشغيل المتصفح للرابط: {target_url}", flush=True)
+    # حظر الموارد الثقيلة
+    if resource_type in ["image", "media", "font", "stylesheet"]:
+        return route.abort()
     
-    captured_data = None
-    playwright = None
-    browser = None
-    context = None
+    if resource_type == "script":
+        # السماح بالسكربتات الأساسية للموقع والمشغل
+        if any(x in url for x in ["kinovod", "hs.js", "jquery", "player", "bundle", "hls"]):
+            return route.continue_()
+        
+        # حظر التتبع والإعلانات
+        if any(x in url for x in ["google", "yandex", "facebook", "sentry", "mc.yandex", "ads"]):
+            return route.abort()
 
-    try:
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(
-            headless=True,
+    route.continue_()
+
+# ==============================================================================
+# 🚀 المشغل الرئيسي (Universal Scraper)
+# ==============================================================================
+def run_universal_spy():
+    print("🚀 تشغيل الجاسوس الشامل (أفلام + مسلسلات)...")
+    
+    # نستخدم حاوية لتخزين النتيجة للوصول إليها من داخل الدوال الفرعية
+    result_container = {"data": None}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,  # وضع التخفي مفعل
             proxy={
-                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                "server": f"http://{PROXY_SERVER}",
                 "username": PROXY_USER,
                 "password": PROXY_PASS
             },
-            args=["--no-sandbox", "--disable-gpu", "--blink-settings=imagesEnabled=false"]
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-gpu", 
+                "--blink-settings=imagesEnabled=false"
+            ]
         )
         
-        context = browser.new_context(ignore_https_errors=True)
-        context.set_default_timeout(60000)
-        page = context.new_page()
-
-        # -------------------------------------------------
-        # 1. اعتراض الردود (للأفلام) - Network Response
-        # -------------------------------------------------
+        page = browser.new_page()
+        
+        # 1. إعداد مراقب الشبكة (للأفلام)
+        # ---------------------------------------------------------
         def handle_response(response):
-            nonlocal captured_data
-            if captured_data: return
+            if result_container["data"]: return
             
+            # الأفلام تطلب رابطاً يحتوي على /vod/
             if "/vod/" in response.url and response.status == 200:
                 try:
                     data = response.json()
-                    if isinstance(data, dict) and "file" in data:
-                        print("🎥 تم التقاط JSON الفيلم من الشبكة!", flush=True)
-                        captured_data = data
+                    # التأكد أن الملف يحتوي على رابط فيديو
+                    if isinstance(data, dict) and ("file" in data or "playlist" in data):
+                        print(f"🎥 تم اصطياد JSON الفيلم من الشبكة: {response.url}")
+                        result_container["data"] = data
                 except: pass
 
         page.on("response", handle_response)
+        page.route("**/*", intercept_network)
 
-        # -------------------------------------------------
-        # 2. حقن جاسوس الكونسول (للمسلسلات) - Console Spy
-        # -------------------------------------------------
+        # 2. حقن جاسوس JSON.parse (للمسلسلات)
+        # ---------------------------------------------------------
         spy_script = """
         const originalParse = JSON.parse;
         JSON.parse = function(text, reviver) {
             try {
                 const result = originalParse(text, reviver);
-                if (result && typeof result === 'object') {
+                // تصفية النتائج المفيدة فقط
+                if (result && (Array.isArray(result) || result.file || result.items)) {
                     const str = JSON.stringify(result);
-                    if ((str.includes('.mp4') || str.includes('.m3u8')) && (result.file || result.items)) {
-                         console.log('$$$JSON$$$' + str);
+                    if (str.includes('.mp4') || str.includes('.m3u8')) {
+                        console.log('$$$CAPTURED$$$' + str);
                     }
                 }
                 return result;
@@ -134,104 +105,68 @@ def browser_scrape(target_url):
         page.add_init_script(spy_script)
 
         def handle_console(msg):
-            nonlocal captured_data
-            if captured_data: return
-            if "$$$JSON$$$" in msg.text:
+            if result_container["data"]: return
+            if "$$$CAPTURED$$$" in msg.text:
+                clean_json = msg.text.replace("$$$CAPTURED$$$", "")
                 try:
-                    clean = msg.text.replace("$$$JSON$$$", "")
-                    data = json.loads(clean)
-                    print("📦 تم التقاط JSON المسلسل من الكونسول!", flush=True)
-                    captured_data = data
+                    print("📦 تم التقاط JSON المسلسل من الكونسول!")
+                    result_container["data"] = json.loads(clean_json)
                 except: pass
 
         page.on("console", handle_console)
 
-        # -------------------------------------------------
-        # 3. تخفيف الشبكة (Blocking Assets)
-        # -------------------------------------------------
-        def intercept_route(route):
-            if route.request.resource_type in ["image", "font", "stylesheet", "media"]:
-                return route.abort()
-            return route.continue_()
-        
-        page.route("**/*", intercept_route)
-
-        # -------------------------------------------------
-        # 4. التنفيذ
-        # -------------------------------------------------
-        print("🚀 الدخول للصفحة...", flush=True)
-        page.goto(target_url, wait_until="domcontentloaded")
-
-        # حلقة الانتظار (Wait Loop)
-        for i in range(20): # 10 ثواني
-            if captured_data: break
+        # 3. التنفيذ
+        # ---------------------------------------------------------
+        try:
+            print(f"🌍 جاري التحميل: {TARGET_URL}")
+            page.goto(TARGET_URL, timeout=60000, wait_until="domcontentloaded")
             
-            # محاولة البحث اليدوي في المتغيرات (Backup)
-            if i > 5 and not captured_data:
-                try:
-                    manual = page.evaluate("() => window.flashvars || window.config || null")
-                    if manual and manual.get('file'):
-                        print("⚡ تم العثور على البيانات في Window Object", flush=True)
-                        captured_data = manual
-                        break
-                except: pass
-
-            try: page.mouse.move(100, 100 + i*10)
+            # محاولة النقر على المشغل (مهم جداً للأفلام لتحفيز الطلب)
+            try:
+                print("👆 محاولة النقر على المشغل...")
+                # محددات شائعة للمشغل
+                page.click("#videoplayer", timeout=2000, force=True)
             except: pass
+
+            print("⏳ انتظار البيانات...")
+            for i in range(20): # 20 ثانية كحد أقصى
+                if result_container["data"]:
+                    break
+                
+                # 4. (احتياطي) فحص المتغيرات العامة في الصفحة
+                if i > 5 and not result_container["data"]:
+                    try:
+                        manual_data = page.evaluate("() => window.flashvars || window.config || null")
+                        if manual_data and manual_data.get('file'):
+                            print("⚡ تم العثور على البيانات في متغيرات Window")
+                            result_container["data"] = manual_data
+                            break
+                    except: pass
+
+                page.wait_for_timeout(1000)
+                # حركة بسيطة للماوس لمنع كشف البوت
+                if i % 5 == 0: page.mouse.move(100, i*50)
+
+        except Exception as e:
+            print(f"⚠️ خطأ أثناء التشغيل: {e}")
+        
+        finally:
+            browser.close()
+
+    # معالجة النتائج النهائية
+    captured_data = result_container["data"]
+    if captured_data:
+        print("\n" + "="*50)
+        print("🎉 البيانات النهائية:")
+        
+        # تنظيف بسيط للروابط إذا كانت سلسلة نصية طويلة
+        if "file" in captured_data and isinstance(captured_data["file"], str) and "[" in captured_data["file"]:
+            print("💡 تم اكتشاف روابط متعددة، جاري التنسيق...")
+            # (يمكنك إضافة كود تقسيم الروابط هنا إذا أردت)
             
-            page.wait_for_timeout(500)
-
-    except Exception as e:
-        print(f"⚠️ Playwright Error: {e}", flush=True)
-        return {"error": str(e)}
-    
-    finally:
-        if context: context.close()
-        if browser: browser.close()
-        if playwright: playwright.stop()
-
-    # معالجة البيانات النهائية
-    if captured_data and "file" in captured_data:
-        # تنظيف الروابط إذا كانت نصاً واحداً طويلاً
-        file_str = captured_data["file"]
-        if isinstance(file_str, str) and "[" in file_str:
-            streams = {}
-            parts = file_str.split(",")
-            for part in parts:
-                q = re.search(r'\[(\d+p)\]', part)
-                l = re.search(r'(https?://[^\s,]+)', part)
-                if q and l:
-                    streams[q.group(1)] = l.group(1).split(" or ")[0]
-            if streams: captured_data["streams"] = streams
-
-    return captured_data
-
-# ==============================================================================
-# 🌐 API Routes
-# ==============================================================================
-@app.route('/scrape')
-def scrape():
-    query = request.args.get('query')
-    if not query: return jsonify({"error": "Missing query"}), 400
-    
-    # 1. المرحلة الأولى: البحث السريع
-    target_url, error = fast_search(query)
-    
-    if error:
-        return jsonify({"error": error}), 404
-    
-    if not target_url:
-        return jsonify({"error": "Result not found"}), 404
-
-    # 2. المرحلة الثانية: المتصفح
-    data = browser_scrape(target_url)
-    
-    if data: return jsonify(data)
-    return jsonify({"error": "No data captured from browser"}), 404
+        print(json.dumps(captured_data, indent=4, ensure_ascii=False))
+    else:
+        print("❌ لم يتم العثور على ملف JSON.")
 
 if __name__ == "__main__":
-    # تثبيت المكتبات المطلوبة أولاً إذا لم تكن موجودة
-    # pip install beautifulsoup4 requests playwright flask
-    # playwright install chromium
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    run_universal_spy()
