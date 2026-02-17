@@ -12,14 +12,15 @@ app = Flask(__name__)
 # ==============================================================================
 # ⚙️ إعدادات البروكسي والثوابت
 # ==============================================================================
-# يمكنك تغيير القيم هنا أو عبر متغيرات البيئة
 PROXY_HOST = os.getenv("PROXY_HOST", "46.161.47.123")
 PROXY_PORT = os.getenv("PROXY_PORT", "9771")
 PROXY_USER = os.getenv("PROXY_USER", "oFRHax")
 PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
 BASE_URL = "https://kinovod120226.pro"
 
-# إعداد البروكسي لمكتبة Requests
+# استخراج الدومين لضبط الكوكيز
+DOMAIN = BASE_URL.split("//")[-1]
+
 REQUESTS_PROXY = {
     "http": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}",
     "https": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}",
@@ -31,6 +32,13 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 }
 
+# 🍪 الكوكيز السحري لإجبار الموقع على HLS
+# القيمة: new|hls|0 (مشغل جديد | hls | بدون HDR)
+FORCED_COOKIES = {
+    "player_settings": "new|hls|0",
+    "theme": "dark" # اختياري
+}
+
 # ==============================================================================
 # 🛠️ أدوات مساعدة
 # ==============================================================================
@@ -39,10 +47,7 @@ def parse_streams(file_string):
     if not isinstance(file_string, str): return file_string
     
     streams = {}
-    # نمط [360p]https://...
     if "[" in file_string and "http" in file_string:
-        # تقسيم بناءً على الفواصل، مع مراعاة أن الرابط قد يحتوي فواصل
-        # الأفضل استخدام Regex للتقسيم
         parts = file_string.split(",")
         for part in parts:
             quality_match = re.search(r'\[(\d+p)\]', part)
@@ -50,11 +55,10 @@ def parse_streams(file_string):
             
             if quality_match and link_match:
                 quality = quality_match.group(1)
-                link = link_match.group(1).split(" or ")[0] # تنظيف الروابط البديلة
+                link = link_match.group(1).split(" or ")[0]
                 streams[quality] = link
         
         if streams: return streams
-    
     return file_string
 
 # ==============================================================================
@@ -68,6 +72,7 @@ def fast_search(query_text):
             params={"query": query_text}, 
             headers=HEADERS, 
             proxies=REQUESTS_PROXY, 
+            cookies=FORCED_COOKIES, # إرسال الكوكيز هنا أيضاً
             timeout=15
         )
         
@@ -90,7 +95,8 @@ def fast_search(query_text):
 def extract_direct(target_url):
     print("⚡ [Phase 2] محاولة الاستخراج المباشر (Regex HTML)...", flush=True)
     try:
-        resp = requests.get(target_url, headers=HEADERS, proxies=REQUESTS_PROXY, timeout=15)
+        # ⚠️ نرسل الكوكيز هنا لإجبار السيرفر على تجهيز روابط HLS في الكود
+        resp = requests.get(target_url, headers=HEADERS, proxies=REQUESTS_PROXY, cookies=FORCED_COOKIES, timeout=15)
         html = resp.text
 
         # البحث عن نمط file:"..."
@@ -126,7 +132,6 @@ def browser_scrape(target_url):
     
     try:
         playwright = sync_playwright().start()
-        # إعدادات متصفح خفيفة جداً لتقليل استهلاك الذاكرة
         browser = playwright.chromium.launch(
             headless=True,
             proxy={
@@ -137,7 +142,7 @@ def browser_scrape(target_url):
             args=[
                 "--no-sandbox",
                 "--disable-gpu",
-                "--disable-dev-shm-usage", # ضروري للدوكر
+                "--disable-dev-shm-usage",
                 "--disable-setuid-sandbox",
                 "--no-zygote",
                 "--single-process",
@@ -145,8 +150,19 @@ def browser_scrape(target_url):
             ]
         )
         
-        page = browser.new_page()
-        page.set_default_timeout(60000) # 60 ثانية
+        # إنشاء سياق وحقن الكوكيز فوراً
+        context = browser.new_context(ignore_https_errors=True)
+        
+        # 🔥 حقن الكوكيز لإجبار HLS
+        context.add_cookies([{
+            "name": "player_settings",
+            "value": "new|hls|0", # القيمة السحرية
+            "domain": DOMAIN,
+            "path": "/"
+        }])
+        
+        page = context.new_page()
+        page.set_default_timeout(60000)
 
         # ---------------------------------------------------------
         # المصيدة 1: اعتراض الردود (Response Listener) - للأفلام
@@ -155,7 +171,6 @@ def browser_scrape(target_url):
             nonlocal captured_data
             if captured_data: return
 
-            # الأفلام تطلب رابطاً يحتوي على /vod/ أو تكون json
             if response.status == 200 and ("/vod/" in response.url or "user_data" in response.url):
                 try:
                     data = response.json()
@@ -175,7 +190,8 @@ def browser_scrape(target_url):
                 try {
                     const result = originalParse(text, reviver);
                     const str = JSON.stringify(result);
-                    if ((str.includes('.mp4') || str.includes('.m3u8')) && (result.file || result.items || Array.isArray(result))) {
+                    // نبحث عن m3u8 بشكل خاص لأننا أجبرنا HLS
+                    if ((str.includes('.m3u8') || str.includes('.mp4')) && (result.file || result.items || Array.isArray(result))) {
                         console.log('$$$JSON$$$' + str);
                     }
                     return result;
@@ -196,15 +212,9 @@ def browser_scrape(target_url):
         page.on("console", handle_console)
 
         # ---------------------------------------------------------
-        # تخفيف الشبكة (Block Assets)
+        # تخفيف الشبكة
         # ---------------------------------------------------------
-        def block_heavy_resources(route):
-            if route.request.resource_type in ["image", "font", "stylesheet", "media", "other"]:
-                return route.abort()
-            return route.continue_()
-        
-        # حظر الصور والوسائط فقط، والسماح للسكربتات و XHR
-        page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css,mp4,mp3}", lambda r: r.abort())
+        page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda r: r.abort())
         
         # ---------------------------------------------------------
         # التنفيذ
@@ -212,7 +222,6 @@ def browser_scrape(target_url):
         print("🚀 الدخول للصفحة...", flush=True)
         page.goto(target_url, wait_until="domcontentloaded")
 
-        # التحقق من الحجب
         if "Just a moment" in page.title() or "403" in page.title():
             print("⛔ تم اكتشاف حماية Anti-Bot!", flush=True)
             return {"error": "Blocked"}
@@ -229,8 +238,7 @@ def browser_scrape(target_url):
                     break
             except: pass
 
-        # حلقة الانتظار
-        for i in range(15): # انتظار 15 ثانية كحد أقصى
+        for i in range(15):
             if captured_data: break
             page.wait_for_timeout(1000)
 
@@ -248,25 +256,21 @@ def browser_scrape(target_url):
 # ==============================================================================
 @app.route('/')
 def index():
-    return jsonify({"status": "Active", "mode": "Hybrid Scraper"})
+    return jsonify({"status": "Active", "mode": "HLS Forced Scraper"})
 
 @app.route('/scrape')
 def scrape():
     query = request.args.get('query')
     if not query: return jsonify({"error": "Missing query"}), 400
     
-    # 1. البحث
     target_url, error = fast_search(query)
     if error: return jsonify({"error": error}), 404
     
-    # 2. الاستخراج المباشر (الأسرع)
     data = extract_direct(target_url)
     if data:
-        # معالجة الروابط
         if "file" in data: data["streams"] = parse_streams(data["file"])
         return jsonify(data)
     
-    # 3. الاستخراج بالمتصفح (الأقوى)
     data = browser_scrape(target_url)
     if data:
         if "file" in data: data["streams"] = parse_streams(data["file"])
