@@ -16,7 +16,7 @@ PROXY_HOST = os.getenv("PROXY_HOST", "46.161.47.123")
 PROXY_PORT = os.getenv("PROXY_PORT", "9771")
 PROXY_USER = os.getenv("PROXY_USER", "oFRHax")
 PROXY_PASS = os.getenv("PROXY_PASS", "4yFtU8")
-BASE_URL = "https://kinovod120226.pro"
+BASE_URL = "https://kinovod170226.pro"
 
 # استخراج الدومين لضبط الكوكيز
 DOMAIN = BASE_URL.split("//")[-1]
@@ -281,3 +281,4 @@ def scrape():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
