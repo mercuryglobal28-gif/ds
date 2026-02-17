@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 
@@ -42,17 +43,20 @@ def get_browser():
     return browser_instance
 
 # ==============================================================================
-# 🛡️ فلترة الشبكة
+# 🛡️ فلترة الشبكة (لمنع تحميل الصور والإعلانات)
 # ==============================================================================
 def intercept_network(route, request):
     rt = request.resource_type
-    if rt in ["image", "font", "stylesheet", "other"]:
+    if rt in ["image", "font", "stylesheet", "media"]: # منع تحميل الميديا لتسريع العمل
         return route.abort()
+    
+    # السماح فقط بالنطاقات والسكربتات المهمة
+    url = request.url.lower()
     if rt == "script":
-        url = request.url.lower()
-        if any(x in url for x in ["kinovod", "hs.js", "jquery", "player", "bundle"]):
+        if any(x in url for x in ["kinovod", "hs.js", "jquery", "player", "bundle", "hls"]):
             return route.continue_()
         return route.abort()
+        
     return route.continue_()
 
 # ==============================================================================
@@ -71,91 +75,90 @@ def search_and_scrape(query_text):
         context.set_default_timeout(60000)
         
         page = context.new_page()
+
+        # ==================================================================
+        # 🔥 الحل السحري: اعتراض الردود (Response Listener)
+        # ==================================================================
+        def handle_response(response):
+            nonlocal captured_data
+            url = response.url
+            
+            # نحن نبحث عن رابط يحتوي على /vod/ (للأفلام والمسلسلات)
+            if "/vod/" in url and response.status == 200:
+                try:
+                    # محاولة قراءة الرد كـ JSON
+                    json_body = response.json()
+                    
+                    # التحقق من وجود الحقل 'file' كما في البيانات التي أرسلتها
+                    if isinstance(json_body, dict) and "file" in json_body:
+                        print(f"✅ تم اصطياد JSON من الرابط: {url}", flush=True)
+                        captured_data = json_body
+                        
+                except Exception as e:
+                    # قد يكون الرد ليس JSON، نتجاهله
+                    pass
+
+        # تفعيل المستمع
+        page.on("response", handle_response)
         page.route("**/*", intercept_network)
 
-        # 1. البحث
+        # 1. البحث والوصول لصفحة الفيلم
         try:
             page.goto(f"{BASE_URL}/search?query={query_text}", wait_until="domcontentloaded")
-            page.wait_for_selector("a[href*='/serial/'], a[href*='/film/']", timeout=10000)
-            element = page.query_selector("a[href*='/serial/'], a[href*='/film/']")
+            page.wait_for_selector(".items .item a", timeout=15000) 
             
+            element = page.query_selector(".items .item a")
             if not element: return {"error": "Not found"}
             
-            target_url = BASE_URL + element.get_attribute("href")
-            print(f"✅ الرابط: {target_url}", flush=True)
+            href = element.get_attribute("href")
+            target_url = BASE_URL + href
+            print(f"🔗 رابط الصفحة: {target_url}", flush=True)
             
         except Exception as e:
             return {"error": f"Search failed: {e}"}
 
-        # 2. حقن الجاسوس (للمسلسلات - XHR)
-        spy_script = """
-        const originalParse = JSON.parse;
-        JSON.parse = function(text, reviver) {
-            try {
-                const result = originalParse(text, reviver);
-                const str = JSON.stringify(result);
-                if (str.includes('.mp4') || str.includes('.m3u8')) {
-                    if (Array.isArray(result) || result.file || (result.items && result.items.length > 0)) {
-                         console.log('$$$CAPTURED$$$' + str);
-                    }
-                }
-                return result;
-            } catch (e) { return originalParse(text, reviver); }
-        }
-        """
-        page.add_init_script(spy_script)
-
-        def handle_console(msg):
-            nonlocal captured_data
-            if "$$$CAPTURED$$$" in msg.text:
-                clean = msg.text.replace("$$$CAPTURED$$$", "")
-                try: captured_data = json.loads(clean)
-                except: pass
-
-        page.on("console", handle_console)
-        
+        # 2. الدخول للصفحة وانتظار الطلب
+        # (لا نحتاج لحقن JS لأننا نراقب الشبكة مباشرة الآن)
         print("🚀 الدخول للصفحة...", flush=True)
         page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
 
-        # 3. حلقة الانتظار + المسح الشامل (للأفلام - Global Object)
-        for i in range(20): # 10 ثواني كحد أقصى
-            if captured_data: break
+        # 3. حلقة الانتظار (Wait Loop)
+        for i in range(20): # 10 ثواني تقريباً
+            if captured_data: 
+                print("📦 البيانات جاهزة!", flush=True)
+                break
             
-            # 💡 السحر هنا: فحص ذاكرة المتصفح بحثاً عن الكائن الذي أرسلته لي
-            # نبحث عن أي متغير يحتوي على خاصية 'file' وبداخله رابط 'http' أو '[360p]'
-            try:
-                manual_data = page.evaluate("""() => {
-                    // 1. فحص المتغيرات المعروفة
-                    if (window.flashvars && window.flashvars.file) return window.flashvars;
-                    if (window.config && window.config.file) return window.config;
-                    
-                    // 2. المسح الشامل لكل متغيرات النافذة (Window)
-                    // هذا سيجد الكائن الذي أرسلته لي {id: 'videoplayer', file: ...}
-                    for (const key in window) {
-                        try {
-                            const obj = window[key];
-                            if (obj && typeof obj === 'object' && obj.file) {
-                                // التأكد أنه رابط فيديو حقيقي
-                                if (typeof obj.file === 'string' && (obj.file.includes('http') || obj.file.includes('['))) {
-                                    return obj;
-                                }
-                            }
-                        } catch(e) {}
-                    }
-                    return null;
-                }""")
-                
-                if manual_data:
-                    print("🎉 تم العثور على البيانات عبر المسح الشامل!", flush=True)
-                    captured_data = manual_data
-                    break
+            # تحريك الماوس لتحفيز تحميل المشغل إذا لزم الأمر
+            try: page.mouse.move(100, 100 + i*10)
             except: pass
-
+            
             page.wait_for_timeout(500)
-            if i % 2 == 0: 
-                # حركة بسيطة قد تساعد في تفعيل السكربتات
-                try: page.mouse.move(100, 100 + i*10)
-                except: pass
+
+        # 4. تنظيف ومعالجة البيانات قبل الإرجاع
+        if captured_data and "file" in captured_data:
+            file_string = captured_data["file"]
+            
+            # تحسين: تحويل النص الطويل إلى قائمة روابط نظيفة
+            # المثال: "[360p]url... ,[720p]url..."
+            streams = {}
+            if "[" in file_string:
+                # تقسيم بناءً على الفاصلة التي تسبق الأقواس (أو الفواصل العادية)
+                parts = file_string.split(",")
+                for part in parts:
+                    quality_match = re.search(r'\[(\d+p)\]', part)
+                    link_match = re.search(r'(https?://[^\s,]+)', part)
+                    
+                    if quality_match and link_match:
+                        quality = quality_match.group(1)
+                        link = link_match.group(1)
+                        # تنظيف الرابط من " or https..."
+                        if " or " in link:
+                            link = link.split(" or ")[0]
+                        streams[quality] = link
+            
+            # إضافة الروابط المنظمة للرد
+            if streams:
+                captured_data["streams"] = streams
 
     except Exception as e:
         print(f"⚠️ خطأ: {e}", flush=True)
